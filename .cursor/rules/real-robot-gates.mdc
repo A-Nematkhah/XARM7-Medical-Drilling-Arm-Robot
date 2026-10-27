@@ -1,0 +1,37 @@
+---
+description: Safety gates required before any real xArm7 + RH56 drill deployment
+globs: run_drill_task.py,sim/**/*.py
+alwaysApply: true
+---
+
+# Real-robot safety gates
+
+Do not send a planned motion, trigger press, or drill feed to hardware (or treat a sim path as hardware-ready) unless it passed `sim/safety.py`. Raise `GateError` and abort; do not continue the phase.
+
+## Must stay gated
+
+- Drill angles: `|tilt|`, `|azim|` and `bit · board_normal`
+- Grasp-site / TCP inside the workspace box
+- Perception confidence (grip points, radius, coarse vs fine axis)
+- Joint-limit margin and Cartesian tracking error
+- Grasp load + lift height before leaving the table
+- Trigger only with bit standoff in front of the board
+- Drill feed speed cap (mm/s), not a fixed short duration
+
+## Hardware transfer
+
+- Do not use MuJoCo `BOARD_POS` / `CAM_POS` as ground truth on the real robot
+- Do not run `servo_step` IK in Python as the live xArm loop; use the controller
+- Angled holes (`tilt`/`azim` ≠ 0) stay behind the gate until perpendicular drilling is stable
+- On hardware use `SafetyGates(real_robot=True)` (tighter angle limits)
+
+```python
+# ❌ BAD
+robot.move_to_pose(p_aim, Rd)
+hand.set_angles(HAND_TRIGGER)
+
+# ✅ GOOD
+gates.check_drill_angles(tilt, azim, d, BOARD_N)
+gates.check_workspace(p_aim, "aim")
+gates.check_trigger_clearance(tip, HOLE_TARGET, BOARD_N)
+```

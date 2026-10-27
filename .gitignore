@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+outputs/*.png
+outputs/*.mp4
+outputs/*.xml
+.DS_Store
+Thumbs.db

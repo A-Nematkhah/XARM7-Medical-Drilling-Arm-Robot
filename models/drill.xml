@@ -1,0 +1,51 @@
+<!--
+  Cordless drill built from primitives (swap in a scanned mesh later if you like).
+  Drill-local frame: +X = chuck/bit direction, +Z = up (drill standing on its battery).
+  * trigger      : slide joint, spring-returned, pressed by the index finger
+  * chuck_spin   : hinge joint driven by a velocity motor that the controller enables
+                   when the trigger is pressed (like a real drill's switch)
+  Colors are chosen to look like a common yellow/black cordless drill; perception
+  segments the yellow housing and the silver bit.
+-->
+<mujoco model="drill">
+  <default>
+    <default class="drill">
+      <geom friction="1.2 0.01 0.001" condim="4" solref="0.004 1" solimp="0.95 0.99 0.001"/>
+      <default class="yellow"><geom rgba="0.96 0.74 0.05 1"/></default>
+      <default class="black"><geom rgba="0.08 0.08 0.08 1"/></default>
+      <default class="metal"><geom rgba="0.78 0.78 0.80 1"/></default>
+    </default>
+  </default>
+  <worldbody>
+    <body name="drill" childclass="drill">
+      <freejoint name="drill_free"/>
+      <!-- battery pack -->
+      <geom name="battery" class="black" type="box" size="0.052 0.040 0.024" pos="-0.012 0 0.024" mass="0.30"/>
+      <geom name="battery_cap" class="yellow" type="box" size="0.040 0.030 0.006" pos="-0.008 0 0.052" mass="0.02"/>
+      <!-- handle (grip) -->
+      <geom name="handle" class="yellow" type="capsule" size="0.0175" fromto="0 0 0.062 0 0 0.166" mass="0.12"/>
+      <geom name="handle_grip" class="black" type="box" size="0.006 0.012 0.046" pos="-0.014 0 0.112" mass="0.005"/>
+      <!-- motor housing + gearbox -->
+      <geom name="body" class="yellow" type="cylinder" size="0.030 0.066" pos="-0.004 0 0.200" quat="0.7071068 0 0.7071068 0" mass="0.30"/>
+      <geom name="nose" class="black" type="cylinder" size="0.024 0.016" pos="0.078 0 0.200" quat="0.7071068 0 0.7071068 0" mass="0.06"/>
+      <site name="drill_axis" pos="0.094 0 0.200" zaxis="1 0 0" size="0.003" group="4"/>
+      <!-- trigger: on the front/index-side corner of the grip; squeezing pushes it toward the grip axis -->
+      <body name="trigger" pos="0.01025 -0.01775 0.1475" euler="0 0 -1.0472">
+        <joint name="trigger" type="slide" axis="-1 0 0" range="0 0.005" stiffness="60" damping="1" springref="0"/>
+        <geom name="trigger" class="black" type="box" size="0.003 0.0075 0.0085" mass="0.005"/>
+      </body>
+      <!-- rotating chuck + bit -->
+      <body name="chuck" pos="0.094 0 0.200">
+        <joint name="chuck_spin" type="hinge" axis="1 0 0" damping="0.0005" armature="0.0002"/>
+        <geom name="chuck" class="black" type="cylinder" size="0.017 0.020" pos="0.020 0 0" quat="0.7071068 0 0.7071068 0" mass="0.08"/>
+        <geom name="chuck_mark" class="yellow" type="box" size="0.010 0.002 0.0172" pos="0.020 0 0" mass="0.0005"/>
+        <geom name="bit" class="metal" type="capsule" size="0.0035" fromto="0.040 0 0 0.110 0 0" mass="0.01"/>
+        <geom name="bit_flute" class="black" type="box" size="0.025 0.0008 0.0036" pos="0.080 0 0" mass="0.0005"/>
+        <site name="bit_tip" pos="0.1135 0 0" size="0.003" rgba="1 0 0 1" group="4"/>
+      </body>
+    </body>
+  </worldbody>
+  <actuator>
+    <velocity name="drill_motor" joint="chuck_spin" kv="0.02" ctrlrange="-120 120" forcerange="-0.5 0.5"/>
+  </actuator>
+</mujoco>
