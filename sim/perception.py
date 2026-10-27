@@ -251,3 +251,92 @@ class DrillDetector:
         cv2.putText(img, f"drill yaw {np.degrees(est.yaw):+.1f} deg", (8, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
         return img
+
+
+@dataclass
+class BoardEstimate:
+    """Workpiece face from wrist RGB-D. `normal` points into the board (same as BOARD_N)."""
+    point: np.ndarray          # point on the face (near the cloud centroid)
+    normal: np.ndarray         # unit, into the board
+    hole: np.ndarray           # target pierce point on the face
+    n_points: int = 0
+    inlier_ratio: float = 0.0
+
+
+class BoardDetector:
+    # Wood-like HSV for the sim plywood (rgba ~ 0.80, 0.64, 0.42) and typical light wood.
+    WOOD_LO, WOOD_HI = (8, 40, 60), (30, 200, 255)
+
+    def __init__(self, cam: D435i, hole_offset_yz=(0.02, -0.01)):
+        self.cam = cam
+        self.hole_offset_yz = np.asarray(hole_offset_yz, float)
+        self.last_mask = None
+
+    def detect(self, rgb, depth, cam_pose, normal_hint=None, min_pts=400):
+        hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+        mk = cv2.inRange(hsv, np.array(self.WOOD_LO), np.array(self.WOOD_HI))
+        mk = cv2.morphologyEx(mk, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+        mk = cv2.morphologyEx(mk, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+        self.last_mask = mk
+        vs, us = np.nonzero((mk > 0) & (depth > 0))
+        if len(us) < min_pts:
+            raise RuntimeError(f"board not found ({len(us)} wood pixels)")
+        P = self.cam.deproject(us.astype(float), vs.astype(float), depth[vs, us], cam_pose)
+        # keep points roughly in front of the robot (workspace band)
+        P = P[(P[:, 0] > 0.35) & (P[:, 0] < 0.90) & (P[:, 2] > 0.05) & (P[:, 2] < 0.70)]
+        if len(P) < min_pts:
+            raise RuntimeError(f"board cloud too small after workspace filter ({len(P)})")
+
+        center, normal, ratio = self._ransac_plane(P, iters=80, thresh=0.008)
+        # convention: normal points into the board (away from the camera / toward +X)
+        cam_p, _ = cam_pose
+        if normal @ (center - cam_p) < 0:
+            normal = -normal
+        if normal_hint is not None and np.dot(normal, normal_hint) < 0:
+            normal = -normal
+        normal = normal / np.linalg.norm(normal)
+
+        # hole = face center + planar offset in world Y/Z (same offsets as the old HOLE_TARGET)
+        off = np.array([0.0, self.hole_offset_yz[0], self.hole_offset_yz[1]])
+        off = off - normal * (off @ normal)
+        hole = center + off
+        return BoardEstimate(point=center, normal=normal, hole=hole,
+                             n_points=len(P), inlier_ratio=float(ratio))
+
+    @staticmethod
+    def _ransac_plane(P, iters=80, thresh=0.008):
+        rng = np.random.default_rng(0)
+        best_inl = None
+        n = len(P)
+        for _ in range(iters):
+            i = rng.choice(n, 3, replace=False)
+            p0, p1, p2 = P[i]
+            nrm = np.cross(p1 - p0, p2 - p0)
+            ln = np.linalg.norm(nrm)
+            if ln < 1e-9:
+                continue
+            nrm = nrm / ln
+            d = np.abs((P - p0) @ nrm)
+            inl = d < thresh
+            if best_inl is None or inl.sum() > best_inl.sum():
+                best_inl = inl
+        if best_inl is None or best_inl.sum() < 50:
+            raise RuntimeError("board plane fit failed")
+        Q = P[best_inl]
+        c = Q.mean(0)
+        _, _, Vt = np.linalg.svd(Q - c, full_matrices=False)
+        return c, Vt[2], best_inl.mean()
+
+    def draw(self, rgb, est: BoardEstimate, cam_pose):
+        img = rgb.copy()
+        if self.last_mask is not None:
+            tint = img.copy(); tint[self.last_mask > 0] = (40, 180, 255)
+            img = cv2.addWeighted(img, 0.65, tint, 0.35, 0)
+        pts, z = self.cam.project(np.stack([est.hole, est.hole + 0.08 * est.normal]), cam_pose)
+        if np.all(z > 0):
+            p = pts.astype(int)
+            cv2.circle(img, tuple(p[0]), 6, (0, 255, 0), -1)
+            cv2.arrowedLine(img, tuple(p[0]), tuple(p[1]), (0, 255, 255), 2, tipLength=0.2)
+        cv2.putText(img, f"board n=({est.normal[0]:+.2f},{est.normal[1]:+.2f},{est.normal[2]:+.2f})",
+                    (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+        return img

@@ -13,10 +13,15 @@ Do not send a planned motion, trigger press, or drill feed to hardware (or treat
 - Drill angles: `|tilt|`, `|azim|` and `bit · board_normal`
 - Grasp-site / TCP inside the workspace box
 - Perception confidence (grip points, radius, coarse vs fine axis)
+- Board detection after grasp (plane inliers + normal facing the robot)
+- Tip-to-board distance approach; refuse hand/housing plane penetration
+- After grasp, never joint-space-reorient near the board (bit can ghost through; chuck contact is excluded). Retreat, then rotate, then approach.
 - Joint-limit margin and Cartesian tracking error
 - Grasp load + lift height before leaving the table
 - Trigger only with bit standoff in front of the board
 - Drill feed speed cap (mm/s), not a fixed short duration
+
+Do not aim using MuJoCo `BOARD_POS` as the live target after grasp; use `BoardDetector` (or a calibrated real board pose) and close the loop on tip-to-face clearance.
 
 ## Hardware transfer
 

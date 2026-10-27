@@ -2,7 +2,7 @@
 xArm7 + Inspire RH56E2 + wrist RealSense D435i: find a cordless drill, pick it up,
 drill a hole in a board, and put the drill back.
 
-    python run_drill_task.py --viewer                 # interactive MuJoCo viewer (real-time)
+    python run_drill_task.py --viewer                 # MuJoCo viewer + live wrist-camera window
     python run_drill_task.py --video outputs/demo.mp4 # headless, records a video
     python run_drill_task.py --random 3               # randomised drill pose (seed 3)
     python run_drill_task.py --viewer --tilt 25 --azim -15   # angled hole (up + left/right)
@@ -14,9 +14,10 @@ Pipeline
   3. grasp plan: palm on the back of the grip, index at trigger height;
      approach sideways along the finger direction, thumb pre-opposed
   4. power grasp (little/ring/middle + thumb), lift, force check
-  5. aim the bit at the target on the board (optional tilt/azim), pull the
-     trigger with the index finger, feed in along the bit axis, retract
-  6. place the drill back where it was and retreat
+  5. look at the board with the wrist camera -> detect face plane + hole
+  6. approach along the bit axis using tip-to-board distance (no collision)
+  7. pull trigger, feed in, retract
+  8. place the drill back where it was and retreat
 """
 import argparse
 import os
@@ -29,7 +30,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "sim"))
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--viewer", action="store_true", help="open the interactive viewer")
+ap.add_argument("--viewer", action="store_true", help="open the interactive viewer + wrist D435i window")
+ap.add_argument("--no-wrist-cam", action="store_true",
+                help="do not open the live wrist-camera window (viewer still works)")
 ap.add_argument("--video", default=None, help="record an mp4 (headless)")
 ap.add_argument("--random", type=int, default=None, help="randomise drill pose with this seed")
 ap.add_argument("--xy", type=float, nargs=2, default=(0.47, -0.02))
@@ -52,7 +55,7 @@ import cv2
 import mujoco
 import scene
 from robot import Robot, REST_Q, ViewPlanner, mat2quat
-from perception import D435i, DrillDetector
+from perception import D435i, DrillDetector, BoardDetector
 from safety import SafetyGates, GateError
 
 # ------------------------------------------------------------------ task constants
@@ -62,9 +65,12 @@ SLIDE = 0.16                   # sideways approach distance along the finger dir
 STANDOFF = 0.008               # palm-to-grip clearance while sliding in, closed at the end
 TRIGGER_ON, TRIGGER_OFF = 1.0e-3, 0.6e-3   # switch hysteresis (m of trigger travel)
 MOTOR_SPEED = 150.0            # rad/s (~1400 rpm, typical low gear)
-HOLE_TARGET = scene.BOARD_POS + np.array([-scene.BOARD_HALF[0], 0.02, -0.01])   # on the board face
-BOARD_N = np.array([1.0, 0.0, 0.0])        # into the board
-AIM_STANDOFF = 0.03            # bit tip clearance before the face at the aim pose
+# Nominal board pose is only a search prior for the first look; drilling uses detection.
+BOARD_N_HINT = np.array([1.0, 0.0, 0.0])
+HOLE_HINT = scene.BOARD_POS + np.array([-scene.BOARD_HALF[0], 0.02, -0.01])
+AIM_STANDOFF = 0.03            # desired tip-to-face clearance before trigger (m)
+APPROACH_CLEAR = 0.14          # start the distance servo this far from the face (m)
+CLEAR_TOL = 0.003              # stop approaching when |clearance - AIM_STANDOFF| < this
 DRILL_DEPTH = 0.025
 FEED_MARGIN = 0.008            # extra stroke: the drill settles a few mm in the hand when lifted
 HAND_GRASP = [0, 0, 0, 1000, 0, 0]          # index stays off the trigger while holding
@@ -81,7 +87,7 @@ def _rodrigues(v, axis, deg):
     return (np.eye(3) + np.sin(a) * K + (1.0 - np.cos(a)) * (K @ K)) @ np.asarray(v, float)
 
 
-def bit_direction(tilt_deg, azim_deg, board_n=BOARD_N, up=UP):
+def bit_direction(tilt_deg, azim_deg, board_n=BOARD_N_HINT, up=UP):
     """Unit bit axis in world: 0/0 = board normal; +tilt=up, +azim=+Y."""
     n = np.asarray(board_n, float); n = n / np.linalg.norm(n)
     u = np.asarray(up, float); u = u / np.linalg.norm(u)
@@ -93,14 +99,27 @@ def bit_direction(tilt_deg, azim_deg, board_n=BOARD_N, up=UP):
     return d / np.linalg.norm(d)
 
 
-def aim_rotation(d, up=UP):
-    """Hand rotation with palm/bit axis along d; index side toward world up when possible."""
+def aim_rotation(d, board_n=BOARD_N_HINT, up=UP):
+    """Palm along the bit; fingers parallel to the board so they cannot stab into it.
+
+    With a large azim, using world-up as the index axis makes the finger axis
+    (d × up) point into the board and the hand collides. Fingers are therefore
+    constrained to the board plane (n × d), with the sign that keeps the index
+    side toward world-up.
+    """
     d = np.asarray(d, float); d = d / np.linalg.norm(d)
-    y = np.asarray(up, float) - d * np.dot(up, d)
-    if np.linalg.norm(y) < 1e-6:
-        y = np.array([0.0, 1.0, 0.0]) - d * d[1]
-    y = y / np.linalg.norm(y)
-    return np.column_stack([d, y, np.cross(d, y)])
+    n = np.asarray(board_n, float); n = n / np.linalg.norm(n)
+    u = np.asarray(up, float)
+    z = np.cross(n, d)                         # // board face
+    if np.linalg.norm(z) < 1e-6:
+        y = u - d * np.dot(u, d)
+        y = y / np.linalg.norm(y)
+        return np.column_stack([d, y, np.cross(d, y)])
+    z = z / np.linalg.norm(z)
+    if np.dot(np.cross(z, d), u) < 0:          # index (y) toward up
+        z = -z
+    y = np.cross(z, d); y = y / np.linalg.norm(y)
+    return np.column_stack([d, y, z])
 
 
 def quat_align_z(v):
@@ -112,10 +131,9 @@ def quat_align_z(v):
     return mat2quat(np.column_stack([x, y, z]))
 
 
-DRILL_DIR = bit_direction(args.tilt, args.azim)
-AIM_R = aim_rotation(DRILL_DIR)
 gates = SafetyGates(real_robot=args.real_robot)
-gates.check_drill_angles(args.tilt, args.azim, DRILL_DIR, BOARD_N)
+# Preliminary angle gate against the nominal board; re-checked after board detection.
+gates.check_drill_angles(args.tilt, args.azim, bit_direction(args.tilt, args.azim), BOARD_N_HINT)
 
 
 def log(msg):
@@ -137,16 +155,18 @@ robot.q_cmd = REST_Q.copy()
 views = ViewPlanner(model)
 cam = D435i(model, data, noise=not args.no_noise, seed=args.random or 0)
 det = DrillDetector(cam)
+board_det = BoardDetector(cam, hole_offset_yz=(0.02, -0.01))
 hand = robot.hand
 hand.set_angles(hand.OPEN); hand.cmd[:] = hand.target
 
 # ------------------------------------------------------------------ drill physics add-ons
-st = dict(motor=False, depth=0.0, phase="start", overlay=None, overlay_until=-1, warned=False)
+st = dict(motor=False, depth=0.0, phase="start", overlay=None, overlay_until=-1, warned=False,
+          holding=False,
+          board_n=BOARD_N_HINT.copy(), hole=HOLE_HINT.copy(), drill_dir=bit_direction(args.tilt, args.azim))
 trig_q = model.jnt_qposadr[model.joint("trigger").id]
 motor_act = model.actuator("drill_motor").id
 tip_site = model.site("bit_tip").id
 hole_gid = model.geom("hole").id
-board_face_x = scene.BOARD_POS[0] - scene.BOARD_HALF[0]
 
 
 def drill_logic():
@@ -158,22 +178,21 @@ def drill_logic():
     data.ctrl[motor_act] = MOTOR_SPEED if st["motor"] else 0.0
 
     tip = data.site_xpos[tip_site]
-    # depth along the board normal (face is x = board_face_x)
-    pen = float(tip[0] - board_face_x)
-    # pierce point on the face along the commanded bit axis
-    dx = float(DRILL_DIR[0])
-    if abs(dx) < 1e-6:
+    n = st["board_n"]; d = st["drill_dir"]; hole = st["hole"]
+    pen = float((tip - hole) @ n)
+    dn = float(d @ n)
+    if abs(dn) < 1e-6:
         return
-    hit = tip - ((tip[0] - board_face_x) / dx) * DRILL_DIR
+    hit = tip - (pen / dn) * d
     rel = hit - scene.BOARD_POS
     inside = abs(rel[1]) < scene.BOARD_HALF[1] and abs(rel[2]) < scene.BOARD_HALF[2]
-    max_pen = 2 * scene.BOARD_HALF[0] / max(abs(dx), 0.2) + 0.005
+    max_pen = 2 * scene.BOARD_HALF[0] / max(abs(dn), 0.2) + 0.005
     if inside and 0 < pen < max_pen:
         if st["motor"]:
             if pen > st["depth"]:
                 st["depth"] = pen
                 model.geom_pos[hole_gid] = [-scene.BOARD_HALF[0] - 0.0005, rel[1], rel[2]]
-                model.geom_quat[hole_gid] = quat_align_z(DRILL_DIR)
+                model.geom_quat[hole_gid] = quat_align_z(d)
                 model.geom_size[hole_gid][:2] = [0.0045, 0.0006]
                 model.geom_rgba[hole_gid][3] = 1.0
         elif pen > 0.002 and not st["warned"]:
@@ -181,6 +200,64 @@ def drill_logic():
 
 
 robot.callbacks.append(drill_logic)
+
+_board_bid = model.body("board").id
+_chuck_bid = model.body("chuck").id
+
+
+def board_collision_guard():
+    """Abort as soon as anything except the chuck/bit touches the board (held motions)."""
+    if not st["holding"]:
+        return
+    for i in range(data.ncon):
+        c = data.contact[i]
+        b1, b2 = int(model.geom_bodyid[c.geom1]), int(model.geom_bodyid[c.geom2])
+        if _board_bid not in (b1, b2):
+            continue
+        other = b2 if b1 == _board_bid else b1
+        if other == _chuck_bid:
+            continue
+        raise GateError(f"collision: {model.body(other).name} hit the board ({st['phase']})")
+
+
+def tip_transit_guard():
+    """Chuck-board contact is excluded, so the bit can ghost through the plywood.
+    After a safe post-grasp retreat, refuse non-drill motions that put the tip into the face."""
+    if not st["holding"]:
+        return
+    ph = str(st["phase"])
+    if ph.startswith(("7/", "FAILED")):
+        return
+    gates.check_transit_tip(
+        data.site_xpos[tip_site], st["hole"], st["board_n"], st["phase"],
+        board_pos=scene.BOARD_POS, board_half=scene.BOARD_HALF)
+
+
+def relocate_held_drill(p_goal, R_goal, T=2.5, name="relocate"):
+    """Move a grasped drill without sweeping the bit through the board.
+
+    Joint-space shortcuts interpolate a ~20 cm bit on an arc. Reorient only once
+    the grasp site is far enough in front of the face, then translate in.
+    """
+    n = st["board_n"]
+    hole = st["hole"]
+    p0, R0 = robot.site_pose()
+    g = gates.grasp_face_clearance(p0, hole, n)
+    need = gates.REORIENT_GRASP_STANDOFF
+    p_via = p0.copy()
+    if g < need:
+        p_via = p0 - (need - g) * n
+    p_via[2] = max(float(p_via[2]), float(p0[2]), float(p_goal[2]), 0.18)
+    gates.check_workspace(p_via, f"{name}-via")
+    if np.linalg.norm(p_via - p0) > 0.015:
+        log(f"{name}: pull back {np.linalg.norm(p_via - p0)*1000:.0f} mm, then reorient")
+        robot.move_to_pose(p_via, R0, T=1.5)
+    robot.move_to_pose(p_via, R_goal, T=1.8)
+    robot.move_to_pose(p_goal, R_goal, T=T)
+
+
+robot.callbacks.append(board_collision_guard)
+robot.callbacks.append(tip_transit_guard)
 if os.environ.get("DBG_CONTACT"):
     _seen = set()
     def _contact_dbg():
@@ -251,6 +328,35 @@ if args.viewer:
 
     robot.callbacks.append(sync)
 
+# live OpenCV window of the palm RealSense (on with --viewer unless --no-wrist-cam)
+if args.viewer and not args.no_wrist_cam:
+    class WristPreview:
+        def __init__(self):
+            self.W, self.H = 640, 360
+            self.r = mujoco.Renderer(model, self.H, self.W)
+            self.every = max(1, int(round(1.0 / 12.0 / robot.ctrl_dt)))
+            self.k = 0
+            cv2.namedWindow("wrist D435i", cv2.WINDOW_NORMAL)
+            cv2.resizeWindow("wrist D435i", self.W, self.H)
+
+        def __call__(self):
+            self.k += 1
+            if self.k % self.every:
+                return
+            if st["overlay"] is not None and sim_t() < st["overlay_until"]:
+                img = cv2.resize(st["overlay"], (self.W, self.H))
+            else:
+                self.r.update_scene(data, camera="d435i_color")
+                img = self.r.render()
+            # MuJoCo returns a non-contiguous RGB view; OpenCV needs contiguous BGR uint8
+            img = np.ascontiguousarray(img[:, :, ::-1], dtype=np.uint8)
+            cv2.putText(img, str(st["phase"]), (8, 22), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.imshow("wrist D435i", img)
+            cv2.waitKey(1)
+
+    robot.callbacks.append(WristPreview())
+
 
 def phase(name):
     st["phase"] = name; log(f"== {name}")
@@ -267,7 +373,7 @@ def main():
     robot.wait(0.3)
 
     # 1) coarse look from above --------------------------------------------------
-    phase("1/7 look: top-down scan")
+    phase("1/8 look: top-down scan")
     ws = np.array([0.48, 0.0, 0.0])                  # centre of the pick area
     # wide (69 deg) image axis along the table depth so the whole drill incl. bit is in view
     p, R = views.site_target_for_view(ws + [-0.05, 0, 0.60], ws, up_hint=(0, 1, 0))
@@ -278,7 +384,7 @@ def main():
     show_detection(rgb, 1.5)
 
     # 2) side view perpendicular to the drill axis -------------------------------
-    phase("2/7 look: side view")
+    phase("2/8 look: side view")
     side = np.cross(UP, [ax[0], ax[1], 0.0])          # the side the hand will come from
     look = np.array([c_xy[0], c_xy[1], 0.11])
     targets = [look + [0, 0, dz] for dz in (-0.03, 0.0, 0.04, 0.09)] + [look + 0.12 * np.array([ax[0], ax[1], 0.8])]
@@ -316,7 +422,7 @@ def main():
     pg = np.array([*est.grip_xy, est.housing_underside_z - GRIP_BELOW_HOUSING])
     tip_in_hand = Rg.T @ (est.bit_tip - pg)            # where the bit will be, in grasp frame
 
-    phase("3/7 approach (sideways, thumb pre-opposed)")
+    phase("3/8 approach (sideways, thumb pre-opposed)")
     hand.set_angles(hand.PRE_GRASP[:5] + [0], speed=800)
     # entry point further out and higher, then diagonally in/down so the fingertips stay clear
     # of the housing footprint; prefer a long slide, fall back to a shorter one if unreachable
@@ -346,7 +452,7 @@ def main():
     robot.move_to_pose(pg, Rg, T=0.6)
 
     # 4) grasp + lift + check ------------------------------------------------------
-    phase("4/7 grasp")
+    phase("4/8 grasp")
     Rdr = data.body("drill").xmat.reshape(3, 3)
     log(f"drill disturbance during approach: {np.linalg.norm(data.body('drill').xpos[:2]-gt_grip)*1000:.1f} mm, "
         f"{np.degrees(np.arctan2(Rdr[1,0], Rdr[0,0]) - yaw):+.1f} deg")
@@ -360,24 +466,108 @@ def main():
     lifted = data.body("drill").xpos[2] - z0
     log(f"lifted drill by {lifted*1000:.0f} mm (commanded 150)")
     gates.check_lift(lifted)
+    # With yaw≈0 the bit already points at the board and, because chuck↔board contact
+    # is excluded, the tip can sit inside the face while the drill is still on the
+    # table. Pull the tip out along -bit BEFORE enabling the transit guard.
+    p_hold, R_hold = robot.site_pose()
+    bit = R_hold[:, 0]
+    n = st["board_n"]
+    tip_clear = gates.tip_clearance(data.site_xpos[tip_site], st["hole"], n)
+    SAFE_TIP = 0.08
+    if tip_clear < SAFE_TIP:
+        pull = -bit if float(bit @ n) > 0.25 else -n
+        dn_pull = float(pull @ n)
+        if abs(dn_pull) < 0.2:
+            pull, dn_pull = -n, -1.0
+        # clearance' = tip_clear - s*(pull·n); want clearance' = SAFE_TIP
+        s = (tip_clear - SAFE_TIP) / dn_pull
+        p_back = p_hold + s * pull
+        p_back[2] = max(float(p_back[2]), float(p_hold[2]))
+        # also keep the grasp far enough for later reorient
+        g0 = gates.grasp_face_clearance(p_back, st["hole"], n)
+        if g0 < gates.REORIENT_GRASP_STANDOFF:
+            p_back = p_back - (gates.REORIENT_GRASP_STANDOFF - g0) * n
+            p_back[2] = max(float(p_back[2]), float(p_hold[2]))
+        gates.check_workspace(p_back, "post-lift tip retreat")
+        log(f"tip was {tip_clear*1000:.1f} mm into/near board -> retreat "
+            f"{np.linalg.norm(p_back - p_hold)*1000:.0f} mm along bit before reorient")
+        robot.move_to_pose(p_back, R_hold, T=2.0)
+        tip_clear = gates.tip_clearance(data.site_xpos[tip_site], st["hole"], n)
+        log(f"tip clearance after retreat: {tip_clear*1000:.1f} mm")
+    st["holding"] = True
 
-    # 5) aim at the board -------------------------------------------------------------
-    phase("5/7 aim the bit at the board")
-    d, Rd = DRILL_DIR, AIM_R
+    # 5) locate the board with the wrist camera ---------------------------------------
+    phase("5/8 locate board")
+    look = HOLE_HINT.copy()
+    # stand off along the nominal board normal so the face fills the wrist view
+    cam_guess = look - 0.38 * BOARD_N_HINT + np.array([0.0, 0.0, 0.08])
+    p_view, R_view = views.site_target_for_view(cam_guess, look, up_hint=UP)
+    gates.check_workspace(p_view, "board-view")
+    relocate_held_drill(p_view, R_view, T=2.5, name="board-view")
+    robot.wait(0.4)
+    rgb, dep = cam.capture()
+    board = board_det.detect(rgb, dep, cam.pose(), normal_hint=BOARD_N_HINT)
+    gates.check_board(board)
+    show_detection(board_det.draw(rgb, board, cam.pose()))
+    err_n = np.degrees(np.arccos(np.clip(board.normal @ BOARD_N_HINT, -1, 1)))
+    err_h = np.linalg.norm(board.hole - HOLE_HINT) * 1000
+    log(f"board: n=({board.normal[0]:+.3f},{board.normal[1]:+.3f},{board.normal[2]:+.3f}), "
+        f"hole=({board.hole[0]:.3f},{board.hole[1]:.3f},{board.hole[2]:.3f}), "
+        f"pts={board.n_points}, inliers={board.inlier_ratio:.0%}")
+    log(f"   vs nominal: normal err {err_n:.1f} deg, hole err {err_h:.1f} mm")
+
+    board_n = board.normal
+    hole = board.hole.copy()
+    d = bit_direction(args.tilt, args.azim, board_n)
+    Rd = aim_rotation(d, board_n)
+    gates.check_drill_angles(args.tilt, args.azim, d, board_n)
+    st["board_n"], st["hole"], st["drill_dir"] = board_n, hole, d
     log(f"drill angle tilt={args.tilt:+.1f} deg, azim={args.azim:+.1f} deg, "
         f"dir=({d[0]:+.3f}, {d[1]:+.3f}, {d[2]:+.3f})")
-    p_aim = HOLE_TARGET - Rd @ tip_in_hand - AIM_STANDOFF * d
-    gates.check_workspace(p_aim, "aim")
-    # pre-aim: back along -d, with a small lift so housing clears the board on steep tilts
-    p_pre = p_aim - 0.10 * d + 0.06 * UP
-    gates.check_workspace(p_pre, "pre-aim")
-    robot.goto_pose_joint_space(p_pre, Rd, T=3.0)
-    robot.move_to_pose(p_aim, Rd, T=1.5); robot.wait(0.3)
-    gates.check_tracking(robot.max_track_err, "aim")
-    gates.check_trigger_clearance(HOLE_TARGET - AIM_STANDOFF * d, HOLE_TARGET, BOARD_N)
 
-    # 6) drill -------------------------------------------------------------------------
-    phase("6/7 pull trigger + drill")
+    # 6) distance-based approach (keep tip clear of the face; refuse hand collisions) --
+    phase("6/8 approach by tip-to-board distance")
+    dn = max(float(d @ board_n), 0.35)
+    # far pose already in drill orientation; tip sits APPROACH_CLEAR in front of the face
+    p_far = hole - Rd @ tip_in_hand - (APPROACH_CLEAR / dn) * d
+    gates.check_workspace(p_far, "approach-far")
+    gates.check_aim_clearance(p_far, Rd, tip_in_hand, hole, board_n, along_d=0.0)
+    relocate_held_drill(p_far, Rd, T=2.0, name="approach-far")
+    robot.wait(0.2)
+
+    def tip_world():
+        p, R = robot.site_pose()
+        return p + R @ tip_in_hand
+
+    clear = gates.tip_clearance(tip_world(), hole, board_n)
+    log(f"approach start: tip-to-face {clear*1000:.1f} mm (target {AIM_STANDOFF*1000:.0f} mm)")
+    for k in range(50):
+        clear = gates.tip_clearance(tip_world(), hole, board_n)
+        err = clear - AIM_STANDOFF
+        if abs(err) <= CLEAR_TOL:
+            log(f"approach settled: tip-to-face {clear*1000:.1f} mm after {k} corrections")
+            break
+        # move tip toward/away along the bit; convert face-clearance error into travel on d
+        step = float(np.clip(err / dn, -0.035, 0.035))
+        p_now, _ = robot.site_pose()
+        p_next = p_now + step * d
+        gates.check_workspace(p_next, "approach")
+        gates.check_aim_clearance(p_next, Rd, tip_in_hand, hole, board_n, along_d=0.0)
+        robot.move_to_pose(p_next, Rd, T=max(0.35, abs(step) / 0.04))
+        if k % 5 == 0:
+            log(f"  correct {k}: clear {clear*1000:.1f} mm -> step {step*1000:+.1f} mm along bit")
+    else:
+        raise GateError(f"approach failed to reach standoff (clearance {clear*1000:.1f} mm)")
+
+    p_aim, _ = robot.site_pose()
+    gates.check_tracking(robot.max_track_err, "approach")
+    gates.check_trigger_clearance(tip_world(), hole, board_n)
+    feed = AIM_STANDOFF + (DRILL_DEPTH + FEED_MARGIN) / dn
+    gates.check_aim_clearance(p_aim, Rd, tip_in_hand, hole, board_n, along_d=0.0)
+    gates.check_aim_clearance(p_aim, Rd, tip_in_hand, hole, board_n, along_d=feed)
+
+    # 7) drill -------------------------------------------------------------------------
+    phase("7/8 pull trigger + drill")
     hand.set_angles(HAND_TRIGGER, speed=500); robot.wait(1.2)
     if not st["motor"]:
         Rdr = data.body("drill").xmat.reshape(3, 3); pdr = data.body("drill").xpos
@@ -385,9 +575,6 @@ def main():
             f"trigger at {model.body('trigger').pos}, grasp site in drill frame "
             f"{np.round(Rdr.T @ (data.site_xpos[robot.ik.site] - pdr), 4)}")
         raise RuntimeError(f"trigger not pressed enough ({data.qpos[trig_q]*1000:.2f} mm)")
-    # feed along the bit axis: clear the standoff, then reach depth along the board normal
-    dn = max(float(d @ BOARD_N), 0.35)
-    feed = AIM_STANDOFF + (DRILL_DEPTH + FEED_MARGIN) / dn
     T_feed = gates.feed_duration(feed, 5.0)
     robot.move_to_pose(p_aim + feed * d, Rd, T=T_feed, settle=0.5)
     log(f"hole depth reached {st['depth']*1000:.1f} mm (along board normal)")
@@ -395,9 +582,10 @@ def main():
     hand.set_angles(HAND_GRASP, speed=500); robot.wait(1.0)
     robot.move_to_pose(p_aim - 0.10 * d + 0.06 * UP, Rd, T=1.5)   # back off along -d
 
-    # 7) put it back -----------------------------------------------------------------
+    # 8) put it back -----------------------------------------------------------------
     if not args.no_place:
-        phase("7/7 place the drill back")
+        phase("8/8 place the drill back")
+        relocate_held_drill(pg + np.array([0.0, 0.0, 0.12]), Rg, T=2.5, name="return")
         p_place = pg + [0, 0, 0.004]
         wps = [pg + [0, 0, 0.12], pg + [0, 0, 0.06], p_place, pg - STANDOFF * a, p_slide]
         q_pl, margin = robot.plan_path_ik(wps, Rg, min_margin=0.1)
@@ -430,12 +618,18 @@ if __name__ == "__main__":
     try:
         main()
     except (RuntimeError, GateError) as e:
-        ok = False; st["phase"] = f"FAILED: {e}"; log(f"FAILED: {e}"); robot.wait(1.0)
+        ok = False
+        st["holding"] = False
+        st["phase"] = f"FAILED: {e}"
+        log(f"FAILED: {e}")
+        robot.wait(1.0)
     finally:
         if recorder:
             recorder.close(); print(f"video written to {args.video}")
+        os.makedirs(os.path.join(HERE, "outputs"), exist_ok=True)
         cv2.imwrite(os.path.join(HERE, "outputs", "last_detection.png"),
                     st["overlay"][:, :, ::-1] if st["overlay"] is not None else np.zeros((10, 10, 3)))
+        cv2.destroyAllWindows()
     if viewer is not None:
         while viewer.is_running():
             time.sleep(0.05); viewer.sync()
