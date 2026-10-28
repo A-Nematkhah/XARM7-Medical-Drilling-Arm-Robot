@@ -25,10 +25,11 @@ Do not aim using MuJoCo `BOARD_POS` as the live target after grasp; use `BoardDe
 
 ## Hardware transfer
 
-- Do not use MuJoCo `BOARD_POS` / `CAM_POS` as ground truth on the real robot
-- Do not run `servo_step` IK in Python as the live xArm loop; use the controller
-- Angled holes (`tilt`/`azim` ≠ 0) stay behind the gate until perpendicular drilling is stable
-- On hardware use `SafetyGates(real_robot=True)` (tighter angle limits)
+- Do not use MuJoCo `BOARD_POS` / `CAM_POS` as ground truth on the real robot; load measured values from `config/calib.yaml`
+- Do not run `servo_step` IK in Python as the live xArm loop; use the controller via `hw` backends (`--backend real` stub until SDK is wired)
+- Prefer `--board-target marker` (or `aruco`) over `offset` for the pierce point
+- Angled holes (`tilt`/`azim` ≠ 0) stay locked until perpendicular is stable (`--allow-angled`, `milestone.allow_angled`, or `config/angled_unlocked`)
+- On hardware use `SafetyGates(real_robot=True)` (tighter angle limits from `config/gates.yaml`)
 
 ```python
 # ❌ BAD

@@ -3,8 +3,13 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+outputs/eval_*.csv
+outputs/metrics*.csv
+outputs/run.jsonl
 outputs/*.png
 outputs/*.mp4
 outputs/*.xml
+MUJOCO_LOG.TXT
+config/angled_unlocked
 .DS_Store
 Thumbs.db

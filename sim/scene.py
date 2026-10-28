@@ -27,6 +27,9 @@ CAM_POS = (0.004, 0.072, 0.030)
 _BOARD_FACE_SCALE = np.sqrt(1.5)
 BOARD_POS = np.array([0.64, -0.34, 0.34])
 BOARD_HALF = np.array([0.012, 0.13 * _BOARD_FACE_SCALE, 0.11 * _BOARD_FACE_SCALE])
+# High-contrast hole target on the face (world Y/Z offsets from board centre).
+HOLE_YZ = np.array([0.02, -0.01])
+HOLE_TARGET = BOARD_POS + np.array([-BOARD_HALF[0], HOLE_YZ[0], HOLE_YZ[1]])
 
 
 def _quat_from_z(yaw):
@@ -74,9 +77,19 @@ def build_spec(drill_xy=(0.47, -0.02), drill_yaw=0.0):
                        pos=[0.0, s * 0.75 * BOARD_HALF[1], -BOARD_HALF[2]], rgba=[0.3, 0.3, 0.3, 1])
     board.add_geom(name="board_leg", type=mujoco.mjtGeom.mjGEOM_BOX, size=[0.02, 0.02, (BOARD_POS[2] - BOARD_HALF[2]) / 2],
                    pos=[0.03, 0, -BOARD_HALF[2] - (BOARD_POS[2] - BOARD_HALF[2]) / 2], rgba=[0.3, 0.3, 0.3, 1])
+    # High-contrast pierce target on the face (white pad + black disk) for perception.
+    face_x = -BOARD_HALF[0] - 0.0006
+    hy, hz = float(HOLE_YZ[0]), float(HOLE_YZ[1])
+    board.add_geom(name="target_pad", type=mujoco.mjtGeom.mjGEOM_BOX,
+                   size=[0.0005, 0.018, 0.018], pos=[face_x, hy, hz],
+                   rgba=[0.95, 0.95, 0.95, 1], contype=0, conaffinity=0)
+    board.add_geom(name="target_dot", type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+                   size=[0.008, 0.00055], pos=[face_x - 0.0003, hy, hz],
+                   quat=[0.7071068, 0, 0.7071068, 0],
+                   rgba=[0.04, 0.04, 0.04, 1], contype=0, conaffinity=0)
     # hole marker grown at runtime while drilling (visual only)
     board.add_geom(name="hole", type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[0.0001, 0.0001, 0],
-                   pos=[-BOARD_HALF[0] - 0.0005, 0, 0], quat=[0.7071068, 0, 0.7071068, 0],
+                   pos=[-BOARD_HALF[0] - 0.0005, hy, hz], quat=[0.7071068, 0, 0.7071068, 0],
                    rgba=[0.12, 0.08, 0.05, 0], contype=0, conaffinity=0)
 
     # ---------------- xArm7 ----------------
@@ -117,10 +130,8 @@ def build_spec(drill_xy=(0.47, -0.02), drill_yaw=0.0):
     dframe = wb.add_frame(pos=[drill_xy[0], drill_xy[1], 0.0005], quat=_quat_from_z(drill_yaw).tolist())
     dframe.attach_body(drill.body("drill"), "", "")
 
-    # (attach_body also copies actuators, equality constraints and contact excludes)
-    # the spinning bit/chuck may pass into the board: material removal is modelled
-    # kinematically by the task (hole depth + marker), not by rigid contact
-    spec.add_exclude(bodyname1="chuck", bodyname2="board")
+    # Bit geoms are contype=0 in drill.xml (kinematic cutting). Chuck↔board contact
+    # is real — no exclude — so over-feed / dry push stops on the chuck housing.
     return spec
 
 

@@ -1,0 +1,39 @@
+# Copy to config/calib.yaml and replace with measured values on hardware.
+# Never use MuJoCo BOARD_POS / CAM_POS as live ground truth on the real robot.
+
+hand_eye:
+  # Wrist camera pose in the grasp/TCP frame (metres, RPY degrees).
+  # R = Rz(yaw) @ Ry(pitch) @ Rx(roll). Live cam.pose() = TCP FK * this, never CAM_POS.
+  t: [-0.0254, 0.072, -0.0975]
+  rpy_deg: [0.0, -90.0, 0.0]
+
+tool:
+  bit_reach: 0.2075        # grip axis -> bit tip (pre-grasp)
+  housing_to_tip: 0.2115   # housing-axis centre -> bit tip (CAD)
+  held_bit_reach: 0.202    # TCP x -> tip after grasp; measure on a fixture
+  chuck_behind_tip: 0.094
+  chuck_r: 0.018
+
+hand:
+  # sim: 1.0 = actuator N*m. RH56: scale FORCE_ACT (0..1000) into N*m so
+  # gates.finger_load (0.4) still means "firm grasp". Example: 0.4/400 = 0.001.
+  force_scale: 1.0
+
+camera:
+  latency_s: 0.067    # seconds of RGB-D delay returned by capture()
+  dropout: 0.02       # fraction of depth pixels zeroed
+  edge_noise_m: 0.003 # extra σ on depth discontinuities
+  min_z: 0.105        # stereo min range (m); pierce-standoff uses RGB only
+
+board:
+  # Search prior only. After grasp, aim from BoardDetector (marker / plane).
+  position: [0.64, -0.34, 0.34]
+  normal: [1.0, 0.0, 0.0]
+  hole_yz: [0.02, -0.01]   # planar Y/Z offset of the target from board centre
+  half: [0.012, 0.159217, 0.134722]   # metres (thickness, Y, Z); replace on hardware
+
+milestone:
+  # Keep false until perpendicular (tilt=azim=0) entry/depth metrics are stable.
+  # Or create an empty file at unlock_file, or pass --allow-angled once.
+  allow_angled: false
+  unlock_file: config/angled_unlocked

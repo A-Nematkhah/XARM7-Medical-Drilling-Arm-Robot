@@ -11,12 +11,12 @@ Robot interface for xArm7 + Inspire RH56E2 in MuJoCo.
 """
 import numpy as np
 import mujoco
+from calibration import camera_pose_from_tcp
+from hw.defaults import REST_Q
 
 ARM_JOINTS = [f"joint{i}" for i in range(1, 8)]
 ARM_ACTS = [f"act{i}" for i in range(1, 8)]
 HAND_ACTS = ["little", "ring", "middle", "index", "thumb_bend", "thumb_rot"]
-# a comfortable "elbow-up, wrist-down" posture used as IK nullspace target
-REST_Q = np.array([0.0, -0.3, 0.0, 0.9, 0.0, 1.2, 0.0])
 
 
 # ---------------------------------------------------------------- math helpers
@@ -104,6 +104,7 @@ class InspireHand:
         self.target = np.full(6, 1000.0)
         self.cmd = self.target.copy()
         self.speed = 1000.0      # units/s (real RH56: speedSet 0..1000)
+        self.force_scale = 1.0   # calib.hand.force_scale; 1.0 = sim actuator N*m
 
     def set_angles(self, angles, speed=None):
         self.target = np.clip(np.asarray(angles, float), 0, 1000)
@@ -120,8 +121,8 @@ class InspireHand:
         return np.round(1000 * (1 - q / self.hi)).astype(int)
 
     def get_forces(self):
-        """Actuator torques (N*m) -- analogous to the RH56 FORCE_ACT registers."""
-        return self.d.actuator_force[self.aid].copy()
+        """Finger load in the same units as `gates.finger_load` (sim: N*m)."""
+        return self.d.actuator_force[self.aid].copy() * float(self.force_scale)
 
     # handy presets
     OPEN = [1000, 1000, 1000, 1000, 1000, 1000]
@@ -140,6 +141,17 @@ class Robot:
         self.nsub = max(1, int(round(ctrl_dt / model.opt.timestep)))
         self.windup = 0.12       # rad, max setpoint-vs-measured offset during servoing
         self.callbacks = []      # called every control tick (rendering, logging, drill logic)
+        self.rest_q = REST_Q.copy()
+        self.max_track_err = 0.0
+
+    @property
+    def qadr(self):
+        """Joint qpos indices — task uses this instead of `robot.ik.qadr`."""
+        return self.ik.qadr
+
+    def get_q(self):
+        """Measured arm joints (controller feedback analogue)."""
+        return self.d.qpos[self.ik.qadr].copy()
 
     # -- low level
     def tick(self):
@@ -228,7 +240,15 @@ class Robot:
             raise RuntimeError("no continuous IK chain along the approach path")
         if best[0] < min_margin:
             raise RuntimeError(f"best joint-limit margin only {best[0]:.2f} rad")
-        return best[1][0], best[0]
+        return best[1], best[0]
+
+    def move_joint_path(self, chain, T_first=3.0, T_step=0.8):
+        """Follow a solved IK chain in joint space (stays on that branch)."""
+        if not chain:
+            return
+        self.move_joints(chain[0], T=T_first)
+        for q in chain[1:]:
+            self.move_joints(q, T=T_step)
 
     def plan_ik(self, p_goal, R_goal, seed=None, n_random=12):
         """Offline IK from several seeds; prefers the solution closest to the current posture."""
@@ -272,23 +292,30 @@ def look_at_rotation(forward, up_hint):
 
 
 class ViewPlanner:
-    """Maps a desired camera pose to a grasp_site target (both are rigid on the hand)."""
+    """Maps a desired camera pose to a grasp_site target via T_ee_cam (not cam_xpos)."""
 
-    def __init__(self, model, cam="d435i_color", site="grasp_site", base="rh_base"):
-        d = mujoco.MjData(model); mujoco.mj_forward(model, d)   # (mj_kinematics skips cameras)
-        Rb = d.xmat[model.body(base).id].reshape(3, 3); pb = d.xpos[model.body(base).id]
-        self.cam_in_base = Rb.T @ (d.cam_xpos[model.camera(cam).id] - pb)
-        self.site_in_base = Rb.T @ (d.site_xpos[model.site(site).id] - pb)
+    def __init__(self, hand_eye, model=None, cam="d435i_color", site="grasp_site"):
+        self.hand_eye = hand_eye
+        self.model = model
+        self.cam_name = cam
+        self.site_name = site
 
-    def line_of_sight_clear(self, model, q, targets, arm_qadr, robot_root="link_base", cam="d435i_color"):
-        """Ray-cast from the camera (at arm config q) to each target; the view is clear if
-        no robot geometry is hit before reaching the target."""
+    def line_of_sight_clear(self, model, q, targets, arm_qadr, robot_root="link_base", cam=None):
+        """Ray-cast from the calibrated camera (at arm config q) to each target.
+
+        On hardware there is no MuJoCo model — skip the occlusion check.
+        """
+        if model is None:
+            return True
+        cam = self.cam_name if cam is None else cam
         d = mujoco.MjData(model)
         d.qpos[:] = model.qpos0; d.qpos[arm_qadr] = q
         mujoco.mj_forward(model, d)
         root = model.body(robot_root).id
         robot_bodies = {b for b in range(model.nbody) if self._is_desc(model, b, root)}
-        c = d.cam_xpos[model.camera(cam).id]
+        p_ee = d.site_xpos[model.site(self.site_name).id]
+        R_ee = d.site_xmat[model.site(self.site_name).id].reshape(3, 3)
+        c, _ = camera_pose_from_tcp(p_ee, R_ee, self.hand_eye)
         gid = np.zeros(1, np.int32)
         for t in targets:
             v = np.asarray(t) - c; L = np.linalg.norm(v)
@@ -307,5 +334,5 @@ class ViewPlanner:
 
     def site_target_for_view(self, cam_pos, look_at, up_hint=(0, 0, 1)):
         R = look_at_rotation(np.asarray(look_at) - np.asarray(cam_pos), np.asarray(up_hint, float))
-        base = np.asarray(cam_pos) - R @ self.cam_in_base
-        return base + R @ self.site_in_base, R
+        p_ee = np.asarray(cam_pos, float) - R @ np.asarray(self.hand_eye.t, float)
+        return p_ee, R

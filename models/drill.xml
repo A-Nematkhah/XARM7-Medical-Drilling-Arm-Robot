@@ -39,8 +39,12 @@
         <joint name="chuck_spin" type="hinge" axis="1 0 0" damping="0.0005" armature="0.0002"/>
         <geom name="chuck" class="black" type="cylinder" size="0.017 0.020" pos="0.020 0 0" quat="0.7071068 0 0.7071068 0" mass="0.08"/>
         <geom name="chuck_mark" class="yellow" type="box" size="0.010 0.002 0.0172" pos="0.020 0 0" mass="0.0005"/>
-        <geom name="bit" class="metal" type="capsule" size="0.0035" fromto="0.040 0 0 0.110 0 0" mass="0.01"/>
-        <geom name="bit_flute" class="black" type="box" size="0.025 0.0008 0.0036" pos="0.080 0 0" mass="0.0005"/>
+        <!-- Bit geoms are visual / inertial only: material removal is kinematic. The chuck
+             itself collides with the board (no ghost) so over-feed stops on contact. -->
+        <geom name="bit" class="metal" type="capsule" size="0.0035" fromto="0.040 0 0 0.110 0 0"
+              mass="0.01" contype="0" conaffinity="0"/>
+        <geom name="bit_flute" class="black" type="box" size="0.025 0.0008 0.0036" pos="0.080 0 0"
+              mass="0.0005" contype="0" conaffinity="0"/>
         <site name="bit_tip" pos="0.1135 0 0" size="0.003" rgba="1 0 0 1" group="4"/>
       </body>
     </body>

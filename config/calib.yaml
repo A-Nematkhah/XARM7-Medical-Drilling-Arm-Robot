@@ -1,0 +1,35 @@
+# Sim defaults (same numbers as sim/scene.py). Replace for hardware.
+
+hand_eye:
+  # Camera origin in grasp_site / TCP. R = Rz(yaw) Ry(pitch) Rx(roll).
+  t: [-0.0254, 0.072, -0.0975]
+  rpy_deg: [0.0, -90.0, 0.0]
+
+tool:
+  bit_reach: 0.2075        # grip axis -> bit tip (pre-grasp, on the table)
+  housing_to_tip: 0.2115   # housing-axis centre -> bit tip (CAD)
+  held_bit_reach: 0.202    # TCP x -> tip AFTER grasp (palm seats ~5 mm back)
+  chuck_behind_tip: 0.094  # bit tip -> chuck origin
+  chuck_r: 0.018
+
+hand:
+  # sim: 1.0 leaves actuator N*m unchanged (gates.finger_load = 0.4 N*m).
+  # RH56: FORCE_ACT is 0..1000. Set so get_forces()*scale is in N*m, e.g. if
+  # FORCE_ACT 400 is a firm grasp, force_scale = 0.4/400 = 0.001.
+  force_scale: 1.0
+
+camera:
+  latency_s: 0.067    # ~2 frames @ 30 Hz (USB/ISP delay)
+  dropout: 0.02
+  edge_noise_m: 0.003
+  min_z: 0.105        # D435i stereo invalid below ~105 mm; marker uses RGB ray-plane
+
+board:
+  position: [0.64, -0.34, 0.34]
+  normal: [1.0, 0.0, 0.0]
+  hole_yz: [0.02, -0.01]
+  half: [0.012, 0.159217, 0.134722]   # metres; match sim/scene.py BOARD_HALF
+
+milestone:
+  allow_angled: false
+  unlock_file: config/angled_unlocked

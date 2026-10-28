@@ -1,0 +1,54 @@
+# Safety-gate limits. Tune here for hardware; do not edit sim/safety.py.
+# --real-robot uses the `real:` angle block; everything else is shared.
+
+sim:
+  max_tilt_deg: 35.0
+  max_azim_deg: 50.0
+  min_bit_dot: 0.50          # ~60 deg from board normal
+
+real:
+  max_tilt_deg: 20.0
+  max_azim_deg: 20.0
+  min_bit_dot: 0.75          # ~41 deg
+
+workspace:
+  x: [0.15, 0.75]
+  y: [-0.55, 0.45]
+  z: [0.04, 0.70]
+
+perception:
+  min_grip_pts: 20
+  grip_radius: [0.010, 0.030]
+  min_board_pts: 300
+  min_board_inliers: 0.35
+  min_board_nx: 0.35          # min n·facing_hint (into-board vs robot/hint)
+  max_hole_prior_err: 0.040   # 40 mm vs calib mark; abort wrong-blob locks
+
+motion:
+  max_track_err: 0.012
+  min_joint_margin: 0.12
+  min_lift: 0.10
+  min_loaded_fingers: 3
+  finger_load: 0.4
+  max_feed_speed: 0.012
+  min_feed_dot: 0.35
+  min_aim_clearance: 0.015
+  transit_min_clear: -0.002
+  reorient_grasp_standoff: 0.28
+  board_body_margin: 0.012
+  housing_r: 0.032
+  housing_behind_tip: 0.145   # yellow motor housing front (not the chuck)
+  chuck_behind_tip: 0.094     # chuck origin behind the bit tip
+  chuck_r: 0.018
+  max_dry_pen: 0.002            # m into face without motor → abort
+  max_board_contact_n: 25.0     # N chuck/housing vs board (sim contact or F/T)
+
+# grasp-frame samples of the hand/wrist (x=palm/bit, y=index, z=fingers)
+hand_samples:
+  - [0.00, 0.00, 0.00]
+  - [0.00, 0.00, 0.10]
+  - [0.00, 0.00, 0.14]
+  - [0.00, 0.05, 0.10]
+  - [0.00, -0.04, 0.08]
+  - [-0.06, 0.00, 0.05]
+  - [-0.10, 0.03, 0.03]
