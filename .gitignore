@@ -13,3 +13,4 @@ MUJOCO_LOG.TXT
 config/angled_unlocked
 .DS_Store
 Thumbs.db
+.cursor/

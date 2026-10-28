@@ -72,7 +72,7 @@ python scripts/eval_batch.py --seeds 0-9 --tilt 15 --azim 10 --allow-angled --mi
 | `sim/robot.py` | Sim IK / servo / Inspire hand |
 | `sim/scene.py` | MuJoCo scene (includes board target pad+dot) |
 | `config/` | `calib.yaml`, `gates.yaml`, optional `angled_unlocked` |
-| `.cursor/rules/real-robot-gates.mdc` | Hardware transfer constraints |
+| `AGENTS.md` | Hardware transfer / safety-gate constraints |
 
 Board pose in `config/calib.yaml` is a search prior only (`position`, `normal`, `hole_yz`, `half`). After grasp, aiming uses `BoardDetector`. Transit checks the estimated tip against that detected face and the calibrated half-size — not MuJoCo `BOARD_POS`.
 
