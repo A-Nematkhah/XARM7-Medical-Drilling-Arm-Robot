@@ -1,0 +1,78 @@
+{
+  "created": "2026-10-30T11:44:40Z",
+  "preset": "quick",
+  "cases": [
+    "smoke_default",
+    "smoke_seed0",
+    "smoke_seed3",
+    "fixed_board_0"
+  ],
+  "metrics": "D:/Thesis/Implementation/XARM7-Medical-Drilling-Arm-Robot/outputs/eval_suite.csv",
+  "report": "D:/Thesis/Implementation/XARM7-Medical-Drilling-Arm-Robot/outputs/eval_suite_report.txt",
+  "results": [
+    {
+      "name": "pytest",
+      "ok": true,
+      "returncode": 0,
+      "fail_reason": "",
+      "note": "unit/integration tests"
+    },
+    {
+      "name": "smoke_default",
+      "ok": false,
+      "returncode": 1,
+      "fail_reason": "no continuous IK chain along the approach path",
+      "note": "default drill/board spawn (recent approach-far tracking fail)",
+      "random": null,
+      "tilt": 0.0,
+      "azim": 0.0,
+      "board_target": "marker",
+      "run_log": "D:/Thesis/Implementation/XARM7-Medical-Drilling-Arm-Robot/outputs/eval_suite_runs/smoke_default.jsonl",
+      "sim_time_s": "7.05"
+    },
+    {
+      "name": "smoke_seed0",
+      "ok": false,
+      "returncode": 1,
+      "fail_reason": "board-view-retreat tracking error 27.7 mm exceeds 12 mm",
+      "note": "random seed 0",
+      "random": 0,
+      "tilt": 0.0,
+      "azim": 0.0,
+      "board_target": "marker",
+      "run_log": "D:/Thesis/Implementation/XARM7-Medical-Drilling-Arm-Robot/outputs/eval_suite_runs/smoke_seed0.jsonl",
+      "sim_time_s": "36.33"
+    },
+    {
+      "name": "smoke_seed3",
+      "ok": false,
+      "returncode": 1,
+      "fail_reason": "no continuous IK chain along the approach path",
+      "note": "random seed 3",
+      "random": 3,
+      "tilt": 0.0,
+      "azim": 0.0,
+      "board_target": "marker",
+      "run_log": "D:/Thesis/Implementation/XARM7-Medical-Drilling-Arm-Robot/outputs/eval_suite_runs/smoke_seed3.jsonl",
+      "sim_time_s": "7.05"
+    },
+    {
+      "name": "fixed_board_0",
+      "ok": true,
+      "returncode": 0,
+      "fail_reason": "",
+      "note": "jitter drill only; board already fixed",
+      "random": 0,
+      "tilt": 0.0,
+      "azim": 0.0,
+      "board_target": "marker",
+      "run_log": "D:/Thesis/Implementation/XARM7-Medical-Drilling-Arm-Robot/outputs/eval_suite_runs/fixed_board_0.jsonl",
+      "entry_err_vs_gt_mm": "0.83",
+      "depth_mm": "24.79",
+      "approach_lat_mm": "0.16",
+      "board_hole_err_mm": "0.35",
+      "sim_time_s": "75.48",
+      "bit_angle_err_deg": "0.06"
+    }
+  ]
+}

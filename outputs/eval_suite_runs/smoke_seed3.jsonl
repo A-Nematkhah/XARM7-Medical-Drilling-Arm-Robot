@@ -1,0 +1,9 @@
+{"t": 0.0, "phase": "run", "event": "start", "backend": "sim", "calib": "D:\\Thesis\\Implementation\\XARM7-Medical-Drilling-Arm-Robot\\config\\calib.yaml", "gates": "D:\\Thesis\\Implementation\\XARM7-Medical-Drilling-Arm-Robot\\config\\gates.yaml", "board_target": "marker", "angled": false, "tilt": 0.0, "azim": 0.0, "seed": 3, "board_pos": [0.64, -0.34, 0.34], "hole_yz": [-0.1071, -0.0551], "board_yaw_deg": 0.0, "utc": "2026-10-30T11:44:07Z"}
+{"t": 0.3, "phase": "1/8 look: top-down scan", "event": "start"}
+{"t": 0.3, "phase": "1/8 look: top-down scan", "event": "lidar", "drill_xy": [0.4910175367385159, 0.13099643078542444], "board_xy": [0.6288948929851964, -0.27851391787244567]}
+{"t": 3.15, "phase": "1/8 look: top-down scan", "event": "end", "coarse_xy_err_mm": 4.44}
+{"t": 3.15, "phase": "2/8 look: side view", "event": "start"}
+{"t": 6.05, "phase": "2/8 look: side view", "event": "end", "grip_err_mm": 0.8512757303307156, "yaw_err_deg": -0.5322780901699898}
+{"t": 6.05, "phase": "3/8 approach (sideways, thumb pre-opposed)", "event": "start"}
+{"t": 6.05, "phase": "run", "event": "fail", "reason": "no continuous IK chain along the approach path", "failed_phase": "FAILED: no continuous IK chain along the approach path"}
+{"t": 7.05, "phase": "run", "event": "end", "success": false, "fail_reason": "no continuous IK chain along the approach path"}

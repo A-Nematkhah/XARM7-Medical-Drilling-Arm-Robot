@@ -1,0 +1,28 @@
+eval_suite report  2026-10-30T11:44:40Z
+metrics: D:\Thesis\Implementation\XARM7-Medical-Drilling-Arm-Robot\outputs\eval_suite.csv
+
+pytest: PASS  
+task cases: 1/4 success (25%)
+
+failures:
+  [smoke_default] no continuous IK chain along the approach path
+  [smoke_seed0] board-view-retreat tracking error 27.7 mm exceeds 12 mm
+  [smoke_seed3] no continuous IK chain along the approach path
+
+fail_reason buckets:
+    2  no continuous IK chain along the approach path
+    1  tracking error
+
+successful runs (mean ± std):
+  entry_err_vs_gt_mm        0.83 ±  0.00 mm
+  approach_lat_mm           0.16 ±  0.00 mm
+  board_hole_err_mm         0.35 ±  0.00 mm
+  depth_mm                 24.79 ±  0.00 mm
+  bit_angle_err_deg         0.06 ±  0.00 deg
+  sim_time_s               75.48 ±  0.00 s
+
+per-case:
+  FAIL  smoke_default             no continuous IK chain along the approach path
+  FAIL  smoke_seed0               board-view-retreat tracking error 27.7 mm exceeds 12 mm
+  FAIL  smoke_seed3               no continuous IK chain along the approach path
+  OK    fixed_board_0             entry=0.83 mm

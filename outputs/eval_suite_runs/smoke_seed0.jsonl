@@ -1,0 +1,16 @@
+{"t": 0.0, "phase": "run", "event": "start", "backend": "sim", "calib": "D:\\Thesis\\Implementation\\XARM7-Medical-Drilling-Arm-Robot\\config\\calib.yaml", "gates": "D:\\Thesis\\Implementation\\XARM7-Medical-Drilling-Arm-Robot\\config\\gates.yaml", "board_target": "marker", "angled": false, "tilt": 0.0, "azim": 0.0, "seed": 0, "board_pos": [0.64, -0.34, 0.34], "hole_yz": [0.0354, -0.0482], "board_yaw_deg": 0.0, "utc": "2026-10-30T11:44:00Z"}
+{"t": 0.3, "phase": "1/8 look: top-down scan", "event": "start"}
+{"t": 0.3, "phase": "1/8 look: top-down scan", "event": "lidar", "drill_xy": [0.253260710172917, -0.12515088007202196], "board_xy": [0.6282369225435495, -0.27739898077275416]}
+{"t": 3.15, "phase": "1/8 look: top-down scan", "event": "end", "coarse_xy_err_mm": 5.76}
+{"t": 3.15, "phase": "2/8 look: side view", "event": "start"}
+{"t": 6.05, "phase": "2/8 look: side view", "event": "end", "grip_err_mm": 0.7742751355196711, "yaw_err_deg": -0.711230355808704}
+{"t": 6.05, "phase": "3/8 approach (sideways, thumb pre-opposed)", "event": "start"}
+{"t": 14.95, "phase": "3/8 approach (sideways, thumb pre-opposed)", "event": "end", "slide_cm": 16.0, "joint_margin": 0.42318759814001705, "track_err_mm": 0.5335604238458055}
+{"t": 14.95, "phase": "4/8 grasp", "event": "start"}
+{"t": 16.15, "phase": "4/8 grasp", "event": "tip_vs_gt", "why": "post-close", "err_mm": 5.6863172607487265}
+{"t": 19.71, "phase": "4/8 grasp", "event": "tip_vs_gt", "why": "post-lift", "err_mm": 4.406895679847991}
+{"t": 19.71, "phase": "4/8 grasp", "event": "end", "lift_mm": 149.7047342332759, "tip_clear_mm": 120.32730478871842}
+{"t": 19.71, "phase": "5/8 locate board", "event": "start"}
+{"t": 35.33, "phase": "board-view", "event": "retreat", "dist_mm": 64.51811893573012, "track_err_mm": 27.654358582601766, "vmax": 0.08, "profile": "relocate"}
+{"t": 35.33, "phase": "run", "event": "fail", "reason": "board-view-retreat tracking error 27.7 mm exceeds 12 mm", "failed_phase": "FAILED: board-view-retreat tracking error 27.7 mm exceeds 12 mm"}
+{"t": 36.33, "phase": "run", "event": "end", "success": false, "fail_reason": "board-view-retreat tracking error 27.7 mm exceeds 12 mm"}

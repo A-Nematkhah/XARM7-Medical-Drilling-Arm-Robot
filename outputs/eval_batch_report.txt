@@ -1,0 +1,111 @@
+# گزارش ارزیابی سیم — seeds 0–9 (عمود)
+تاریخ (UTC): 2026-10-30
+دستور:
+  python scripts/eval_batch.py --seeds 0-9 --min-success 0.0 --no-place
+خروجی متریک: outputs/eval_batch.csv
+شاخه/وضعیت: main @ 4b79095 (+ تغییرات محلی در صورت وجود)
+
+================================================================================
+۱) خلاصه اجرایی
+================================================================================
+موفقیت: 7/10 (70%)
+حد آستانهٔ معمول milestone (min_success 0.8): رد — برای unlock زاویه‌دار کافی نیست.
+baseline قبلی tracked (outputs/baselines/perp_seeds_0-9.csv): 10/10 (100%).
+
+وقتی مسیر کامل می‌شود دقت سوراخ خوب است (~0.7 mm entry vs GT).
+شکست‌ها قبل از feed رخ می‌دهند: grasp IK، wrap load، tracking در board-view retreat.
+
+================================================================================
+۲) نتیجهٔ هر سید
+================================================================================
+seed  success  fail_reason / دقت
+----  -------  ---------------------------
+0     FAIL     board-view-retreat tracking error 27.7 mm exceeds 12 mm
+1     FAIL     grasp: 1 loaded fingers, need 3
+2     OK       entry_vs_gt=0.88 mm  depth=24.75 mm  lat=0.05 mm
+3     FAIL     no continuous IK chain along the approach path
+4     OK       entry_vs_gt=0.61 mm  depth=24.83 mm  lat=0.14 mm
+5     OK       entry_vs_gt=0.46 mm  depth=24.85 mm  lat=0.03 mm
+6     OK       entry_vs_gt=0.46 mm  depth=24.81 mm  lat=0.05 mm
+7     OK       entry_vs_gt=0.71 mm  depth=24.81 mm  lat=0.13 mm
+8     OK       entry_vs_gt=1.17 mm  depth=24.73 mm  lat=0.10 mm
+9     OK       entry_vs_gt=0.48 mm  depth=24.82 mm  lat=0.11 mm
+
+باکت fail_reason:
+  1× tracking error (board-view-retreat)
+  1× grasp load (کمتر از 3 انگشت loaded)
+  1× no continuous IK chain (approach grasp)
+
+================================================================================
+۳) دقت روی runهای موفق (n=7) — mean ± std (population)
+================================================================================
+  entry_err_vs_gt_mm      0.68 ± 0.25 mm   (min 0.46, max 1.17)
+  entry_err_vs_cmd_mm     0.46 ± 0.16 mm
+  approach_lat_mm         0.09 ± 0.04 mm
+  approach_clear_mm      29.87 ± 0.05 mm   (هدف AIM_STANDOFF=30 mm)
+  board_hole_err_mm       0.29 ± 0.12 mm
+  grip_err_mm             0.76 ± 0.04 mm
+  depth_mm               24.80 ± 0.04 mm   (هدف 25 mm)
+  depth_err_mm           -0.20 ± 0.04 mm
+  depth_gt_mm            24.88 ± 0.05 mm
+  bit_angle_err_deg       0.06 ± 0.01 deg
+  cut_force_n             6.08 ± 0.01 N
+  chuck_rpm            1051.2 ± 0.1 rpm
+  sim_time_s             77.4 ± 3.0 s
+
+تفسیر دقت (فقط موفق‌ها):
+  - ورود سوراخ زیر ~1.2 mm نسبت به GT؛ میانگین زیر 1 mm.
+  - planar approach زیر 0.15 mm — حلقهٔ visual-servo سالم است.
+  - عمق ~0.2 mm کوتاه‌تر از هدف (crawl/feed stop نزدیک DRILL_DEPTH).
+  - زاویه مته ناچیز (~0.06°) برای عمود.
+
+================================================================================
+۴) مقایسه با baseline قبلی
+================================================================================
+  متریک              الان (7/10 OK)     baseline 0-9 (10/10)
+  ----------------   ---------------    ---------------------
+  success rate       70%                100%
+  mean entry vs GT   ~0.68 mm           ~2.2 mm (روی همهٔ موفق‌ها)
+  mean depth est     ~24.8 mm           ~25.8 mm
+
+نکته: entry الان روی موفق‌ها بهتر از baseline قدیمی به نظر می‌رسد، ولی
+قابلیت اطمینان (reliability) بدتر شده — سه fail زودرس جلوی آمار 10/10 را گرفته.
+
+================================================================================
+۵) تشخیص ریشه‌ای (شواهد از لاگ)
+================================================================================
+A) Grasp IK (seed 3، و در eval_suite قبلاً default/seed3):
+   همهٔ optionهای slide با «no continuous IK chain» رد می‌شوند.
+   ترجیح robot-left بعضی هندسه‌ها را سخت‌تر کرده؛ fallback راست هم گاهی
+   زنجیرهٔ IK ندارد.
+
+B) Tracking در board-view retreat (seed 0):
+   بعد از grasp/lift، hop عقب‌نشینی ~28 mm tracking می‌دهد (گیت 12 mm).
+   relocate پیوسته هنوز روی بعضی hopهای کوتاه با دریل در دست overshoot دارد.
+
+C) Grasp load (seed 1):
+   فقط 1 انگشت loaded؛ wrap قبل از lift abort می‌شود.
+   احتمالاً drift دریل هنگام approach یا pose wrap نامناسب برای آن yaw/spawn.
+
+D) وقتی از این سه رد شد:
+   locate board، approach، feed پایدار و دقیق‌اند.
+
+================================================================================
+۶) اولویت اصلاح (برای رسیدن دوباره به ≥80–100٪)
+================================================================================
+1. Grasp approach IK: مسیر high-Z / گزینه‌های slide بیشتر / اگر چپ fail شد
+   سریع‌تر و با waypoints امن‌تر به راست برو؛ یا plan_path_ik را شل‌تر روی
+   jump با گیت table.
+2. Held relocate retreat: settle بیشتر / vmax کمتر روی retreat کوتاه /
+   یا split فقط برای hopهای retreat نزدیک بورد (بدون برگشت به chop همه‌جا).
+3. Grasp close: reacquire grip / retry close اگر loaded < 3 قبل از abort سخت.
+
+بعد از فیکس: همین دستور را دوباره بزن؛ هدف عملی ≥ 8/10 و بعد 10/10 برای unlock زاویه.
+
+================================================================================
+۷) وضعیت کلی
+================================================================================
+  قابلیت اطمینان تسک:   ضعیف–متوسط (70٪) — رگرسیون نسبت به baseline 100٪
+  دقت سوراخ (مشروط به موفقیت): خوب (entry ~0.7 mm، lat ~0.1 mm)
+  آمادگی unlock زاویه‌دار: خیر (نیاز ≥80٪ روی 10 سید عمود)
+  گلوگاه بعدی: grasp reachability + held retreat tracking، نه feed/depth PI
