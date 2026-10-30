@@ -37,7 +37,7 @@ python run_drill_task.py --fixed-spawn --eval --no-place
 python run_drill_task.py --real-robot --calib config/calib.yaml --gates config/gates.yaml
 ```
 
-Each sim run **randomizes the face mark and the drill** (board pose stays fixed). Drill XY stays in the left-of-board patch (x 0.30–0.58 m, y −0.14–0.28 m; cyan box). Pass `--random SEED` to reproduce; `--fixed-spawn` keeps the default drill/mark. Aim stays on `BoardDetector`; spawn pose is eval GT only.
+Each sim run **randomizes the face mark and the drill** (board pose stays fixed). Drill XY stays in the left-of-board patch (x 0.442–0.55 m, y −0.14–0.104 m; cyan box). The box is derived so a robot-left 16 cm wrap keeps TCP and hand/wrist/LiDAR samples inside `workspace.x/y`. Pass `--random SEED` to reproduce; `--fixed-spawn` keeps the default drill/mark. Aim stays on `BoardDetector`; spawn pose is eval GT only.
 
 `--real-robot` only tightens software gates (use while still on `--backend sim` to rehearse hardware limits). It does **not** open the xArm controller by itself.
 

@@ -3,7 +3,8 @@ import numpy as np
 from safety import GateError
 
 from task.constants import (
-    DEPTH_TOL, DRILL_DEPTH, FEED_MARGIN, HAND_GRASP, UP,
+    DEPTH_TOL, DRILL_DEPTH, ENTRY_HIT_PEN, FEED_CTRL_TOL, FEED_MARGIN,
+    HAND_GRASP, UP,
 )
 from task.feed_ctrl import DepthFeedCtrl
 from task.geom import ang_err_deg, planar_err_mm
@@ -48,7 +49,7 @@ def drill_hole(ctx):
     feed = ctx.motion["feed"]
     vmax = min(feed.vmax, ctx.gates.MAX_FEED_SPEED)
     ctrl = DepthFeedCtrl.from_profile(
-        feed, target=DRILL_DEPTH, vmax=vmax, dn=dn, tol=0.4 * DEPTH_TOL)
+        feed, target=DRILL_DEPTH, vmax=vmax, dn=dn, tol=FEED_CTRL_TOL)
     dt = feed.t_min
     entry_hit_gt = None
     while n_step < _MAX_FEED_ITERS:
@@ -56,10 +57,10 @@ def drill_hole(ctx):
         clear = ctx.gates.tip_clearance(tip, ctx.hole, ctx.board_n)
         pen = max(0.0, -clear)
         ctx.st["depth"] = max(float(ctx.st["depth"]), pen)
-        if entry_hit_gt is None and pen >= 0.001:
-            # First millimetre into the face — true entry before the bit can twist.
+        if entry_hit_gt is None and pen >= ENTRY_HIT_PEN:
+            # First contact — capture before cut-twist walks the pierce point.
             entry_hit_gt = _capture_entry_hit(ctx)
-        if pen >= DRILL_DEPTH - 0.4 * DEPTH_TOL:
+        if pen >= DRILL_DEPTH:
             ctx.log(f"depth reached: estimated {pen*1000:.1f} mm after {n_step} feed steps")
             break
         force_n = float(ctx.st.get("cut_force_now") or 0.0)
@@ -69,11 +70,16 @@ def drill_hole(ctx):
             pen, max_along - along, dt, force_n=force_n, rpm=rpm,
             motor_on=bool(ctx.st["motor"]))
         if step <= 1e-5:
-            if pen >= DRILL_DEPTH - DEPTH_TOL:
+            if pen >= DRILL_DEPTH:
                 break
-            raise GateError(
-                f"feed budget exhausted at estimated depth {pen*1000:.1f} mm "
-                f"(target {DRILL_DEPTH*1000:.0f} mm; check FEED_MARGIN / tip)")
+            need = (DRILL_DEPTH - pen) / dn
+            step = min(float(ctrl.max_step), max(0.0, need),
+                       max(0.0, max_along - along))
+            speed = min(vmax, max(float(ctrl.vmin), step / max(dt, 1e-4)))
+            if step <= 1e-5:
+                raise GateError(
+                    f"feed budget exhausted at estimated depth {pen*1000:.1f} mm "
+                    f"(target {DRILL_DEPTH*1000:.0f} mm; check FEED_MARGIN / tip)")
         along += step
         T = ctx.gates.feed_duration(step, max(feed.t_min, step / max(speed, 1e-6)))
         ctx.robot.move_along(ctx.d, step, ctx.Rd, T=T, speed=speed, settle=feed.settle)

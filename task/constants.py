@@ -15,13 +15,14 @@ TRANSIT_TCP_Z = 0.22
 REORIENT_TCP_Z = 0.28
 TABLE_CLEAR_Z = 0.015
 # Table XY box for top-down search when LiDAR misses (pad around scene.DRILL_SPAWN_*).
-DRILL_SCAN_LO = np.array([0.28, -0.18])
-DRILL_SCAN_HI = np.array([0.60, 0.32])
+# Kept in sync with sim/scene.py spawn (left wrap + hand envelope inside workspace).
+DRILL_SCAN_LO = np.array([0.40, -0.18])
+DRILL_SCAN_HI = np.array([0.59, 0.15])
 # Viewer overlay of the sim spawn patch. Not a live aim target (BoardDetector is).
 SPAWN_FACE_XY = np.array([0.64, -0.34])
 SPAWN_FACE_EXTENT_XY = np.array([0.012, 0.13 * np.sqrt(1.5)])
-SPAWN_DRILL_LO = np.array([0.30, -0.14])
-SPAWN_DRILL_HI = np.array([0.58, 0.28])
+SPAWN_DRILL_LO = np.array([0.442267, -0.14])
+SPAWN_DRILL_HI = np.array([0.55, 0.103560])
 # Index 0..1000: 0 = closed (trigger pressed), 1000 = extended (off). The finger
 # often stops ~300–420 against the trigger pad; ON must sit above that contact.
 INDEX_TRIGGER_ON = 480
@@ -30,7 +31,10 @@ MOTOR_SPEED = 150.0
 AIM_STANDOFF = 0.03
 APPROACH_CLEAR = 0.14
 CLEAR_TOL = 0.003
-LAT_TOL = 0.002               # planar (Y/Z) settle tolerance (m)
+LAT_TOL = 0.002               # planar (Y/Z) settle during the long approach (m)
+AIM_LAT_TOL = 0.0005          # post-trigger / final aim planar settle (m)
+FEED_CTRL_TOL = 0.00015       # DepthFeedCtrl stop band (m); crawl until DRILL_DEPTH
+ENTRY_HIT_PEN = 0.0003        # first pierce capture for eval (m)
 MAX_APPROACH_STEP = 0.02      # max TCP step per visual-servo tick (m); < AIM_STANDOFF
 MAX_HOLE_JUMP = 0.05          # reject marker updates that teleport (m)
 MARKER_ALPHA = 0.35           # EMA weight of new pierce-point measurement

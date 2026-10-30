@@ -60,7 +60,7 @@ def perceive_and_grasp(ctx):
         look + 0.12 * np.array([ax[0], ax[1], 0.8])]
     q = None
     ax3 = np.array([ax[0], ax[1], 0.0])
-    view_sides = _side_signs_away_from_board(ctx, look, side0, +0.34)
+    view_sides = _side_signs_robot_left(ctx, look, side0, +0.34)
     for side_sign in view_sides:
         side = side_sign * side0
         for dist, hgt in [(0.34, 0.25), (0.30, 0.22), (0.38, 0.28)]:
@@ -103,74 +103,14 @@ def perceive_and_grasp(ctx):
     ctx.est = est
     ctx.phase_end("2/8 look: side view", grip_err_mm=grip_err, yaw_err_deg=yaw_err)
 
-    a = est.axis / np.linalg.norm(est.axis)
-    bz = np.cross(a, UP)
-    bn = float(np.linalg.norm(bz))
-    if bn < 1e-9:
-        bz = np.array([0.0, 1.0, 0.0])
-    else:
-        bz = bz / bn
-    Rg = np.column_stack([a, UP, bz])
-    pg = np.array([*est.grip_xy, est.housing_underside_z - GRIP_BELOW_HOUSING])
+    a, bz, Rg, pg = _grasp_pose_from_est(est)
     ctx.tip_in_hand = bind_tip_in_hand(pg, Rg, est.bit_tip)
     ctx.a, ctx.Rg, ctx.pg = a, Rg, pg
 
     ctx.phase("3/8 approach (sideways, thumb pre-opposed)")
     ctx.hand.set_angles(ctx.hand.PRE_GRASP[:5] + [0], speed=800)
-    options = [(SLIDE, 0.06, 0.10), (0.12, 0.04, 0.08), (0.12, 0.06, 0.05),
-               (0.12, 0.01, 0.03), (0.12, 0.0, 0.02), (0.10, 0.03, 0.07)]
-    gates.check_workspace(pg, "grasp")
-    q_start = robot.get_q()
-    last_err = None
-    slide = margin = 0.0
-    p_slide = None
-    arrived = False
-    gprof = ctx.motion["grasp"]
-    for side_sign in _side_signs_away_from_board(ctx, pg, bz, -SLIDE):
-        bz_s = float(side_sign) * bz
-        for slide, out, up in options:
-            p_slide = pg - slide * bz_s - STANDOFF * a
-            p_entry = p_slide - out * bz_s + np.array([0.0, 0.0, up])
-            wps = ([p_entry, p_slide]
-                   + [pg - STANDOFF * a - s * slide * bz_s for s in (0.66, 0.33, 0.0)]
-                   + [pg])
-            try:
-                _gate_workspace(ctx, wps)
-                _gate_transit_clears_table([p_entry], Rg, gates=gates)
-                chain, margin = robot.plan_path_ik(wps, Rg)
-                gates.check_joint_margin(margin)
-            except (RuntimeError, GateError) as ex:
-                ctx.log(f"approach option side={side_sign:+.0f} {slide, out, up} rejected: {ex}")
-                last_err = ex
-                continue
-            ctx.log(f"approach: side {side_sign:+.0f}, slide {slide*100:.0f} cm, "
-                    f"joint-limit margin {margin:.2f} rad")
-            try:
-                robot.move_joint_path(
-                    chain[:-1],
-                    T_first=max(float(gprof.joint_T_first), 3.0),
-                    T_step=max(float(gprof.joint_T_step), 0.8))
-                gates.check_joint_margin(robot.limit_margin(robot.get_q()))
-                e = robot.move_to_pose(pg - STANDOFF * a, Rg, T=1.5)
-                q_meas = robot.get_q()
-                ctx.log(f"slide max tracking err {robot.max_track_err*1000:.1f} mm; "
-                        f"residual {np.round(e[:3]*1000, 1)} mm; q={np.round(q_meas, 2)}")
-                gates.check_tracking(robot.max_track_err, "slide")
-                gates.check_joint_margin(robot.limit_margin(q_meas))
-                arrived = True
-                break
-            except GateError as ex:
-                last_err = ex
-                ctx.log(f"approach option side={side_sign:+.0f} {slide, out, up} "
-                        f"failed in motion: {ex}")
-                safe_goto_joints(
-                    robot, q_start, gates=gates, T=ctx.motion["scan"].joint_T)
-        if arrived:
-            break
-    if not arrived:
-        raise last_err if last_err is not None else GateError(
-            "drill is outside the reachable grasping workspace")
-    ctx.p_slide = p_slide
+    a, bz, Rg, pg, slide, margin, p_slide = _approach_sideways(ctx, a, bz, Rg, pg)
+    ctx.a, ctx.Rg, ctx.pg, ctx.p_slide = a, Rg, pg, p_slide
     robot.move_to_pose(pg, Rg, T=0.6)
     p_now, R_now = robot.site_pose()
     ctx.tip_in_hand = bind_tip_in_hand(p_now, R_now, est.bit_tip)
@@ -182,23 +122,11 @@ def perceive_and_grasp(ctx):
     sm = getattr(ctx, "state_machine", None) or TaskStateMachine()
     ctx.state_machine = sm
     sm.enter(TaskState.CLOSE_HAND, reason="at grip")
-    # If the free drill slid during approach, reacquire the live grip XY before
-    # closing (perception `pg` is otherwise stale and the wrap loads on air).
-    dist_mm = _drill_knock_mm(ctx)
-    if dist_mm > 5.0 and data is not None:
-        live_xy = np.asarray(data.body("drill").xpos[:2], float)
-        shift = live_xy - np.asarray(pg[:2], float)
-        if float(np.linalg.norm(shift)) > 0.004:
-            pg = np.array([live_xy[0], live_xy[1], float(pg[2])], float)
-            ctx.pg = pg
-            ctx.log(f"reacquire live grip XY after {dist_mm:.0f} mm drift "
-                    f"-> ({pg[0]:.3f}, {pg[1]:.3f})")
-            gates.check_workspace(pg, "grasp-reacquire")
-            peak = _slow_cart_to(robot, pg - STANDOFF * a, Rg, vmax=0.025, hop=0.02)
-            peak = max(peak, _slow_cart_to(robot, pg, Rg, vmax=0.015, hop=0.012))
-            residual = float(np.linalg.norm(robot.site_pose()[0] - pg))
-            robot.max_track_err = max(float(robot.max_track_err), residual, peak)
-            gates.check_tracking(residual, "grasp-reacquire")
+    # Free drill may have slid during approach. Small XY shifts: cart hop.
+    # Large knocks: refresh axis from the live body and re-approach (wrap on
+    # stale pg loads on air — seed 1 was 56 mm drift / 1 loaded finger).
+    a, bz, Rg, pg, est = _refresh_grip_before_close(ctx, a, bz, Rg, pg, est)
+    ctx.a, ctx.Rg, ctx.pg = a, Rg, pg
     close = _close_with_retry(ctx, pg, Rg, lateral=bz)
     p_now, R_now = robot.site_pose()
     t = bind_tip_in_hand(p_now, R_now, est.bit_tip)
@@ -244,12 +172,34 @@ def perceive_and_grasp(ctx):
     z0 = float(p_now[2])
     p_lift = p_now.copy()
     p_lift[2] = z0 + 0.15
+    # Bake bit-away retreat into the lift so we do not stop at hover then yank back.
+    n = ctx.st["board_n"]
+    hole = ctx.st["hole"]
+    tip = measured_tip(ctx)
+    tip_clear = gates.tip_clearance(tip, hole, n)
+    if _has_live_board_prior(ctx) and tip_clear < SAFE_TIP:
+        bit = R_now[:, 0]
+        pull = -bit if float(bit @ n) > 0.25 else -n
+        dn_pull = float(pull @ n)
+        if abs(dn_pull) < 0.2:
+            pull, dn_pull = -n, -1.0
+        s = (tip_clear - SAFE_TIP) / dn_pull
+        p_back = p_now + s * pull
+        p_back[2] = max(float(p_back[2]), float(p_lift[2]))
+        g0 = gates.grasp_face_clearance(p_back, hole, n)
+        if g0 < gates.REORIENT_GRASP_STANDOFF:
+            p_back = p_back - (gates.REORIENT_GRASP_STANDOFF - g0) * n
+            p_back[2] = max(float(p_back[2]), float(p_lift[2]))
+        gates.check_workspace(p_back, "lift")
+        ctx.log(f"tip was {tip_clear*1000:.1f} mm into/near board -> lift+retreat "
+                f"{np.linalg.norm(p_back - p_now)*1000:.0f} mm")
+        p_lift = p_back
     gates.check_workspace(p_lift, "lift")
     # Hold the deepened squeeze explicitly during the lift.
     ctx.hand.set_angles(grasp_cmd, speed=CLOSE_SPEED)
     lift_dist = float(np.linalg.norm(p_lift - p_now))
     robot.move_to_pose(p_lift, R_now, **ctx.motion["lift"].cart_kwargs(lift_dist))
-    robot.wait(0.3)
+    robot.wait(0.12)
     lifted = float(robot.site_pose()[0][2]) - z0
     ctx.log(f"lifted TCP by {lifted*1000:.0f} mm (commanded 150)")
     try:
@@ -302,16 +252,16 @@ def perceive_and_grasp(ctx):
         s = (tip_clear - SAFE_TIP) / dn_pull
         p_back = p_hold + s * pull
         p_back[2] = max(float(p_back[2]), float(p_hold[2]))
-        g0 = gates.grasp_face_clearance(p_back, ctx.st["hole"], n)
+        g0 = gates.grasp_face_clearance(p_back, hole, n)
         if g0 < gates.REORIENT_GRASP_STANDOFF:
             p_back = p_back - (gates.REORIENT_GRASP_STANDOFF - g0) * n
             p_back[2] = max(float(p_back[2]), float(p_hold[2]))
         gates.check_workspace(p_back, "post-lift tip retreat")
-        ctx.log(f"tip was {tip_clear*1000:.1f} mm into/near board -> retreat "
-                f"{np.linalg.norm(p_back - p_hold)*1000:.0f} mm along bit before reorient")
+        ctx.log(f"tip still {tip_clear*1000:.1f} mm into/near board -> extra retreat "
+                f"{np.linalg.norm(p_back - p_hold)*1000:.0f} mm")
         retreat_dist = float(np.linalg.norm(p_back - p_hold))
         robot.move_to_pose(p_back, R_hold, **ctx.motion["relocate"].cart_kwargs(retreat_dist))
-        tip_clear = gates.tip_clearance(measured_tip(ctx), ctx.st["hole"], n)
+        tip_clear = gates.tip_clearance(measured_tip(ctx), hole, n)
         ctx.log(f"tip clearance after retreat: {tip_clear*1000:.1f} mm")
     log_tip_vs_gt(ctx, "post-lift")
     ctx.st["holding"] = True
@@ -540,6 +490,311 @@ def _slow_cart_to(robot, p_goal, R_goal, vmax=0.03, hop=0.03, settle=0.12):
     return peak
 
 
+# Classic long side-slides first (working seeds). Short slides cover +Y
+# workspace clips and leftover IK misses (seeds 1 / 3).
+_APPROACH_CLASSIC = (
+    (SLIDE, 0.06, 0.10),
+    (0.12, 0.04, 0.08),
+    (0.12, 0.06, 0.05),
+    (0.12, 0.01, 0.03),
+    (0.12, 0.0, 0.02),
+    (0.10, 0.03, 0.07),
+)
+_APPROACH_SHORT = (
+    (0.08, 0.03, 0.08),
+    (0.08, 0.02, 0.05),
+    (0.06, 0.02, 0.06),
+)
+
+
+def _approach_option_list(prefer_short=False):
+    if prefer_short:
+        return list(_APPROACH_SHORT) + list(_APPROACH_CLASSIC)
+    return list(_APPROACH_CLASSIC) + list(_APPROACH_SHORT)
+
+
+def _grasp_pose_from_est(est):
+    a = np.asarray(est.axis, float)
+    nrm = float(np.linalg.norm(a))
+    a = a / nrm if nrm > 1e-9 else np.array([1.0, 0.0, 0.0])
+    bz = np.cross(a, UP)
+    bn = float(np.linalg.norm(bz))
+    if bn < 1e-9:
+        bz = np.array([0.0, 1.0, 0.0])
+    else:
+        bz = bz / bn
+    Rg = np.column_stack([a, UP, bz])
+    pg = np.array([*est.grip_xy, est.housing_underside_z - GRIP_BELOW_HOUSING])
+    return a, bz, Rg, pg
+
+
+def _clipped_side_wps(ctx, pg, a, bz_s, slide, out, up):
+    """Same polyline as the live approach, with only the high entry clipped."""
+    pg = np.asarray(pg, float)
+    a = np.asarray(a, float)
+    bz_s = np.asarray(bz_s, float)
+    p_slide = pg - float(slide) * bz_s - STANDOFF * a
+    p_entry = p_slide - float(out) * bz_s + np.array([0.0, 0.0, float(up)])
+    p_entry = _clip_to_workspace(ctx, p_entry)
+    wps = ([p_entry, p_slide]
+           + [pg - STANDOFF * a - s * float(slide) * bz_s for s in (0.66, 0.33, 0.0)]
+           + [pg])
+    return wps, p_slide
+
+
+def _shoulder_folded(q):
+    """True when J2 is cranked down; Cartesian hops from here miss by ~25 mm."""
+    return float(np.asarray(q, float).reshape(-1)[1]) < -1.0
+
+
+def _iter_side_geoms(ctx, pg, a, bz, side_sign, options):
+    """Clip / via / drop polylines for one approach side."""
+    bz_s = float(side_sign) * np.asarray(bz, float)
+    seen_drop = set()
+    for kind in ("clip", "via", "drop"):
+        for slide, out, up in options:
+            if kind == "clip":
+                wps, p_slide = _clipped_side_wps(ctx, pg, a, bz_s, slide, out, up)
+            elif kind == "via":
+                wps, p_slide = _grasp_waypoints(ctx, pg, a, bz_s, slide, out, up)
+            else:
+                key = (round(float(slide), 3), round(float(out), 3))
+                if key in seen_drop:
+                    continue
+                seen_drop.add(key)
+                wps, p_slide = _side_slide_waypoints(pg, a, bz_s, slide, out)
+                wps = [np.asarray(p, float).copy() for p in wps]
+                wps[0] = _clip_to_workspace(ctx, wps[0])
+            yield float(side_sign), float(slide), float(out), float(up), wps, p_slide, kind
+
+
+def _approach_sideways(ctx, a, bz, Rg, pg, prefer_short=False):
+    """Side-slide to `pg` from the robot's left (+Y) only."""
+    robot, gates = ctx.robot, ctx.gates
+    gates.check_workspace(pg, "grasp")
+    q_start = robot.get_q()
+    drill_snap = _drill_free_state(ctx)
+    last_err = None
+    tried_motion = set()
+    gprof = ctx.motion["grasp"]
+
+    def _restore_start():
+        try:
+            safe_goto_joints(
+                robot, q_start, gates=gates, T=ctx.motion["scan"].joint_T)
+        except (GateError, RuntimeError) as ex:
+            ctx.log(f"approach restore: {ex}")
+        _restore_drill_free(ctx, drill_snap)
+    frames = [(np.asarray(a, float), np.asarray(bz, float), np.asarray(Rg, float), "primary")]
+
+    def _run_chain(side_sign, slide, out, up, wps, p_slide, a_use, Rg_use, how,
+                   allow_folded=True, careful=False):
+        nonlocal last_err
+        key = (round(float(side_sign), 0), round(float(slide), 3),
+               round(float(out), 3), round(float(up), 3), how)
+        if key in tried_motion:
+            return None
+        try:
+            _gate_workspace(ctx, wps)
+            _gate_transit_clears_table([wps[0]], Rg_use, gates=gates)
+            cands = list(_ik_candidates(robot, wps, Rg_use))
+        except (RuntimeError, GateError) as ex:
+            ctx.log(f"approach option side={side_sign:+.0f} {slide, out, up} "
+                    f"[{how}] rejected: {ex}")
+            last_err = ex
+            return None
+        unfolded = [t for t in cands if not _shoulder_folded(t[1][-1])]
+        if not unfolded and not allow_folded:
+            ctx.log(f"approach option side={side_sign:+.0f} {slide, out, up} "
+                    f"[{how}] rejected: only folded-shoulder IK")
+            last_err = GateError("only folded-shoulder IK")
+            return None
+        use = (unfolded if unfolded else list(cands))[:2]
+        side_y = float(np.asarray(p_slide, float)[1] - np.asarray(pg, float)[1])
+        for _cost, chain, margin in use:
+            try:
+                gates.check_joint_margin(margin)
+            except GateError as ex:
+                last_err = ex
+                continue
+            ctx.log(f"approach: side {side_sign:+.0f} "
+                    f"({'robot-left' if side_y >= 0.0 else 'robot-right'}), "
+                    f"slide {slide*100:.0f} cm, {how}, "
+                    f"joint-limit margin {margin:.2f} rad")
+            tried_motion.add(key)
+            try:
+                if careful:
+                    _execute_grasp_approach(
+                        ctx, robot, pg, a_use, Rg_use, wps, chain, p_slide,
+                        q_start)
+                    q_meas = robot.get_q()
+                    residual = float(np.linalg.norm(robot.site_pose()[0] - pg))
+                    ctx.log(f"slide residual {residual*1000:.1f} mm; "
+                            f"q={np.round(q_meas, 2)}")
+                else:
+                    robot.move_joint_path(
+                        chain[:-1],
+                        T_first=max(float(gprof.joint_T_first), 3.0),
+                        T_step=max(float(gprof.joint_T_step), 0.8))
+                    gates.check_joint_margin(robot.limit_margin(robot.get_q()))
+                    e = robot.move_to_pose(pg - STANDOFF * a_use, Rg_use, T=1.5)
+                    q_meas = robot.get_q()
+                    ctx.log(f"slide max tracking err {robot.max_track_err*1000:.1f} mm; "
+                            f"residual {np.round(e[:3]*1000, 1)} mm; "
+                            f"q={np.round(q_meas, 2)}")
+                    gates.check_tracking(robot.max_track_err, "slide")
+                    gates.check_joint_margin(robot.limit_margin(q_meas))
+                knock = _drill_knock_mm(ctx)
+                if knock > 18.0:
+                    ctx.log(f"approach option side={side_sign:+.0f} {slide, out, up} "
+                            f"[{how}] knocked the drill {knock:.0f} mm; "
+                            "restore and try next")
+                    last_err = GateError(
+                        f"drill knocked during approach ({knock:.0f} mm)")
+                    _restore_start()
+                    return None
+                return slide, margin, p_slide
+            except GateError as ex:
+                last_err = ex
+                ctx.log(f"approach option side={side_sign:+.0f} {slide, out, up} "
+                        f"[{how}] failed in motion: {ex}")
+                _restore_start()
+                return None
+        if not use:
+            last_err = last_err or GateError("no IK chain with joint-limit margin")
+        return None
+
+    def _try_frame(fa, fbz, fRg, lab, emergency, allow_folded=True):
+        nonlocal last_err
+        side_order = _grasp_side_left_only(ctx, pg, fbz, -SLIDE)
+        for side_sign in side_order:
+            opts = _approach_option_list(prefer_short=prefer_short)
+            n_knock = 0
+            for side_s, slide, out, up, wps, p_slide, kind in _iter_side_geoms(
+                    ctx, pg, fa, fbz, side_sign, opts):
+                how = lab if kind == "clip" and lab != "primary" else kind
+                got = _run_chain(side_s, slide, out, up, wps, p_slide, fa, fRg, how,
+                                 allow_folded=allow_folded, careful=prefer_short)
+                if got is not None:
+                    return (fa, fbz, fRg, pg) + got
+                if last_err is not None and "knocked" in str(last_err).lower():
+                    n_knock += 1
+                    if n_knock >= 2:
+                        ctx.log(f"approach: two knocks on robot-left; "
+                                "skip remaining geometries on this side")
+                        break
+        if not emergency:
+            return None
+        emerg = _list_emergency_raised_paths(
+            ctx, robot, pg, fa, fbz, fRg, side_order, None, limit=2)
+        for slide, out, up, side_sign, wps, chain, margin, p_slide, _clr in emerg:
+            ctx.log(f"approach: emergency side {side_sign:+.0f} "
+                    f"slide {slide*100:.0f} cm, joint-limit margin {margin:.2f} rad")
+            try:
+                _execute_grasp_approach(
+                    ctx, robot, pg, fa, fRg, wps, chain, p_slide, q_start)
+                return fa, fbz, fRg, pg, float(slide), float(margin), p_slide
+            except (GateError, RuntimeError) as ex:
+                last_err = ex
+                ctx.log(f"approach option side={side_sign:+.0f} {slide, out, up} "
+                        f"[emergency] failed in motion: {ex}")
+                _restore_start()
+        return None
+
+    for fa, fbz, fRg, lab in frames:
+        got = _try_frame(fa, fbz, fRg, lab, emergency=False, allow_folded=False)
+        if got is not None:
+            return got
+    got = _try_frame(frames[0][0], frames[0][1], frames[0][2], frames[0][3],
+                     emergency=False, allow_folded=True)
+    if got is not None:
+        return got
+    got = _try_frame(frames[0][0], frames[0][1], frames[0][2], frames[0][3],
+                     emergency=True, allow_folded=True)
+    if got is not None:
+        return got
+
+    raise last_err if last_err is not None else GateError(
+        "drill is outside the reachable grasping workspace")
+
+
+def _grip_from_live_drill(ctx, est, pg, a):
+    """Rebuild grasp pose from the sim drill body after a knock. Hardware: no-op."""
+    data = getattr(ctx, "data", None)
+    if data is None:
+        return _grasp_pose_from_est(est) + (est,)
+    live_xy = np.asarray(data.body("drill").xpos[:2], float)
+    Rdr = np.asarray(data.body("drill").xmat, float).reshape(3, 3)
+    ax = np.array([Rdr[0, 0], Rdr[1, 0], 0.0], float)
+    nrm = float(np.linalg.norm(ax))
+    if nrm < 1e-9:
+        ax = np.array([a[0], a[1], 0.0], float)
+        nrm = float(np.linalg.norm(ax))
+    ax = ax / nrm if nrm > 1e-9 else np.array([1.0, 0.0, 0.0])
+    if float(ax[:2] @ np.asarray(a, float)[:2]) < 0.0:
+        ax = -ax
+    bz = np.cross(ax, UP)
+    bn = float(np.linalg.norm(bz))
+    bz = bz / bn if bn > 1e-9 else np.array([0.0, 1.0, 0.0])
+    Rg = np.column_stack([ax, UP, bz])
+    pg2 = np.array([live_xy[0], live_xy[1], float(pg[2])], float)
+    tip = np.asarray(est.bit_tip, float).copy()
+    site = getattr(ctx, "tip_site", None)
+    if site is not None and int(site) >= 0:
+        try:
+            tip = np.asarray(data.site_xpos[int(site)], float).copy()
+        except Exception:
+            pass
+    est.grip_xy = live_xy.copy()
+    est.axis = ax
+    est.bit_tip = tip
+    return ax, bz, Rg, pg2, est
+
+
+def _refresh_grip_before_close(ctx, a, bz, Rg, pg, est):
+    """After approach, follow a knocked drill instead of wrapping on stale pg."""
+    robot, gates = ctx.robot, ctx.gates
+    dist_mm = _drill_knock_mm(ctx)
+    data = getattr(ctx, "data", None)
+    if dist_mm <= 5.0 or data is None:
+        return a, bz, Rg, pg, est
+    live_xy = np.asarray(data.body("drill").xpos[:2], float)
+    if float(np.linalg.norm(live_xy - np.asarray(pg[:2], float))) <= 0.004:
+        return a, bz, Rg, pg, est
+
+    a2, bz2, Rg2, pg2, est2 = _grip_from_live_drill(ctx, est, pg, a)
+    if dist_mm <= 15.0:
+        ctx.log(f"reacquire live grip XY after {dist_mm:.0f} mm drift "
+                f"-> ({pg2[0]:.3f}, {pg2[1]:.3f})")
+        gates.check_workspace(pg2, "grasp-reacquire")
+        peak = _slow_cart_to(robot, pg2 - STANDOFF * a2, Rg2, vmax=0.025, hop=0.02)
+        peak = max(peak, _slow_cart_to(robot, pg2, Rg2, vmax=0.015, hop=0.012))
+        residual = float(np.linalg.norm(robot.site_pose()[0] - pg2))
+        robot.max_track_err = max(float(robot.max_track_err), residual, peak)
+        gates.check_tracking(residual, "grasp-reacquire")
+        return a2, bz2, Rg2, pg2, est2
+
+    ctx.log(f"large drill drift {dist_mm:.0f} mm; re-approach from live pose "
+            f"-> ({pg2[0]:.3f}, {pg2[1]:.3f})")
+    ctx.grasp_reapproached = True
+    ctx.hand.set_angles(ctx.hand.PRE_GRASP[:5] + [0], speed=800)
+    p_now, R_now = robot.site_pose()
+    p_up = p_now.copy()
+    p_up[2] = max(float(p_now[2]) + 0.10, TRANSIT_TCP_Z)
+    try:
+        gates.check_workspace(p_up, "knock-lift")
+        gates.check_hand_vs_table(p_up, R_now, name="knock-lift")
+        _slow_cart_to(robot, p_up, R_now, vmax=0.04, hop=0.03)
+    except GateError as ex:
+        ctx.log(f"knock-lift skipped: {ex}")
+    a2, bz2, Rg2, pg2, slide, margin, p_slide = _approach_sideways(
+        ctx, a2, bz2, Rg2, pg2, prefer_short=True)
+    del slide, margin
+    ctx.p_slide = p_slide
+    robot.move_to_pose(pg2, Rg2, T=0.6)
+    return a2, bz2, Rg2, pg2, est2
+
+
 def _close_with_retry(ctx, pg, Rg, lateral=None):
     """Close until loaded; nudge Z / along-axis / lateral if wrap fingers miss."""
     robot, gates = ctx.robot, ctx.gates
@@ -548,6 +803,12 @@ def _close_with_retry(ctx, pg, Rg, lateral=None):
         min_loaded=gates.MIN_LOADED_FINGERS, loaded_idx=LOADED_IDX,
         speed=CLOSE_SPEED, timeout=CLOSE_TIMEOUT)
     if close.n_loaded >= gates.MIN_LOADED_FINGERS:
+        return close
+    # 0–1 loaded fingers means the hand closed on air. Millimetre nudges
+    # around a stale grip cannot create wrap contact (seed 1: 1 finger / 335 mm).
+    if close.n_loaded < 2 or getattr(ctx, "grasp_reapproached", False):
+        ctx.log(f"grasp retry skipped: {close.n_loaded} loaded fingers "
+                "(need a wrap, not air nudges)")
         return close
     ctx.log(f"grasp retry: {close.n_loaded} loaded fingers, reseat nudges")
     lat = None
@@ -718,12 +979,15 @@ def _board_plane(ctx):
     return np.asarray(hole, float), np.asarray(n, float), half
 
 
-def _side_signs_away_from_board(ctx, origin, lateral, offset):
-    """`+1/-1` so `origin + sign*offset*lateral` is farther from the board first."""
+def _side_signs_robot_left(ctx, origin, lateral, offset):
+    """`+1/-1` preferring the robot's left (+Y) standoff; opposite is last.
+
+    xArm faces +X toward the board, so left-hand approach is the larger world-Y
+    of `origin + offset*sign*lateral`. Side-view look may use both; grasp
+    approach uses only the first sign via `_grasp_side_left_only`.
+    """
+    del ctx  # kept for call-site symmetry with the old board-away helper
     sides = [1.0, -1.0]
-    board_xy = _board_xy_prior(ctx)
-    if board_xy is None:
-        return sides
     o = np.asarray(origin, float).reshape(-1)[:2]
     lat = np.asarray(lateral, float).reshape(-1)[:2]
     ln = float(np.linalg.norm(lat))
@@ -731,11 +995,21 @@ def _side_signs_away_from_board(ctx, origin, lateral, offset):
         return sides
     lat = lat / ln
 
-    def clear(sign):
+    def world_y(sign):
         p = o + float(offset) * float(sign) * lat
-        return float(np.linalg.norm(p - board_xy))
+        return float(p[1])
 
-    return sorted(sides, key=clear, reverse=True)
+    return sorted(sides, key=world_y, reverse=True)
+
+
+def _grasp_side_left_only(ctx, origin, lateral, offset):
+    """Robot-left standoff only. Grasp never slides in from the right."""
+    return [_side_signs_robot_left(ctx, origin, lateral, offset)[0]]
+
+
+def _side_signs_away_from_board(ctx, origin, lateral, offset):
+    """Deprecated alias: grasp always prefers robot-left now."""
+    return _side_signs_robot_left(ctx, origin, lateral, offset)
 
 
 def _board_away_normal(ctx):

@@ -3,7 +3,7 @@ import numpy as np
 from safety import GateError
 
 from task.constants import (
-    AIM_STANDOFF, APPROACH_CLEAR, CLEAR_TOL, DRILL_DEPTH, FEED_MARGIN,
+    AIM_LAT_TOL, AIM_STANDOFF, APPROACH_CLEAR, CLEAR_TOL, DRILL_DEPTH, FEED_MARGIN,
     LAT_TOL, MARKER_ALPHA, MARKER_MIN_N_DOT, MARKER_N_ALPHA, MAX_APPROACH_STEP,
     MAX_HOLE_JUMP,
 )
@@ -70,7 +70,7 @@ def approach_board(ctx):
     relocate_held_drill(
         ctx, p_far, Rd, profile="relocate", name="approach-far",
         final_profile="approach")
-    ctx.robot.wait(0.2)
+    ctx.robot.wait(0.1)
     sm.enter(TaskState.APPROACH_BOARD, reason="tip-to-face")
     _second_look(ctx)
     # Drill may have seated during the reorient; refresh lateral tip offset.
@@ -80,35 +80,9 @@ def approach_board(ctx):
     def tip_world():
         return measured_tip(ctx)
 
-    def refresh_hole():
-        """Re-see the mark; RGB ray-plane, so it still works when depth is invalid."""
-        if ctx.args.board_target == "offset":
-            return False
-        try:
-            capture = getattr(ctx.cam, "settle_capture", None) or ctx.cam.capture
-            rgb, dep = capture()
-            new, src, px = ctx.board_det.locate_target(
-                rgb, dep, ctx.cam.pose(), ctx.board.point, ctx.board_n)
-        except (RuntimeError, AttributeError):
-            return False
-        filt = _ensure_filter(ctx)
-        hole_f, jump, ok = filt.update_hole(
-            new, plane_point=ctx.board.point, plane_n=ctx.board_n)
-        if not ok:
-            ctx.log(f"  marker jump {jump*1000:.0f} mm ignored")
-            ctx.runlog.event("6/8 approach by tip-to-board distance", "marker_jump",
-                             jump_mm=jump * 1000.0)
-            return False
-        ctx.hole = hole_f
-        ctx.st["hole"] = hole_f
-        ctx.board.hole = hole_f
-        ctx.board.target_px = px
-        ctx.board.target_source = src
-        return True
-
     clear = ctx.gates.tip_clearance(tip_world(), hole, board_n)
     ctx.log(f"approach start: tip-to-face {clear*1000:.1f} mm (target {AIM_STANDOFF*1000:.0f} mm)")
-    refresh_hole()
+    _refresh_marker_hole(ctx)
     hole = ctx.hole
     lat0 = _planar_miss(tip_world(), d, hole, board_n, ctx.gates.MIN_FEED_DOT)
     ctx.runlog.event("6/8 approach by tip-to-board distance", "clearance",
@@ -117,7 +91,7 @@ def approach_board(ctx):
 
     n_refresh = 0
     for k in range(50):
-        if k % 2 == 0 and refresh_hole():
+        if k % 2 == 0 and _refresh_marker_hole(ctx):
             n_refresh += 1
             hole = ctx.hole
         dn = max(float(d @ board_n), ctx.gates.MIN_FEED_DOT)
@@ -173,17 +147,49 @@ def approach_board(ctx):
                   feed_mm=feed * 1000.0, marker_updates=n_refresh)
 
 
+def _refresh_marker_hole(ctx):
+    """Re-see the mark; RGB ray-plane, so it still works when depth is invalid."""
+    if getattr(ctx.args, "board_target", None) == "offset":
+        return False
+    if ctx.board_det is None or ctx.cam is None or ctx.board is None:
+        return False
+    try:
+        capture = getattr(ctx.cam, "settle_capture", None) or ctx.cam.capture
+        rgb, dep = capture()
+        new, src, px = ctx.board_det.locate_target(
+            rgb, dep, ctx.cam.pose(), ctx.board.point, ctx.board_n)
+    except (RuntimeError, AttributeError):
+        return False
+    filt = _ensure_filter(ctx)
+    hole_f, jump, ok = filt.update_hole(
+        new, plane_point=ctx.board.point, plane_n=ctx.board_n)
+    if not ok:
+        ctx.log(f"  marker jump {jump*1000:.0f} mm ignored")
+        ctx.runlog.event("6/8 approach by tip-to-board distance", "marker_jump",
+                         jump_mm=jump * 1000.0)
+        return False
+    ctx.hole = hole_f
+    ctx.st["hole"] = hole_f
+    ctx.board.hole = hole_f
+    ctx.board.target_px = px
+    ctx.board.target_source = src
+    return True
+
+
 def nudge_to_aim(ctx, name="aim-nudge"):
     """Cartesian hops so the current estimated tip matches AIM_STANDOFF / hole."""
+    _refresh_marker_hole(ctx)
     d, board_n, hole, Rd = ctx.d, ctx.board_n, ctx.hole, ctx.Rd
-    for _ in range(4):
+    lat_tol = AIM_LAT_TOL
+    for _ in range(8):
+        hole = ctx.hole
         dn = max(float(d @ board_n), ctx.gates.MIN_FEED_DOT)
         tip = measured_tip(ctx)
         tip_des = hole - (AIM_STANDOFF / dn) * d
         err = tip_des - tip
         clear = ctx.gates.tip_clearance(tip, hole, board_n)
         lat = _planar_miss(tip, d, hole, board_n, ctx.gates.MIN_FEED_DOT)
-        if abs(clear - AIM_STANDOFF) <= CLEAR_TOL and lat <= LAT_TOL:
+        if abs(clear - AIM_STANDOFF) <= CLEAR_TOL and lat <= lat_tol:
             return
         nerr = float(np.linalg.norm(err))
         if nerr < 1e-6:

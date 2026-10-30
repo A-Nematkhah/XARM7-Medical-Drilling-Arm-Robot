@@ -61,7 +61,7 @@ def _from_wrist_look(ctx, look, n_hint, search):
     relocate_held_drill(
         ctx, p_view, R_view, profile="relocate", name="board-view",
         final_profile="approach")
-    ctx.robot.wait(0.4)
+    ctx.robot.wait(0.15)
     capture = getattr(ctx.cam, "settle_capture", None) or ctx.cam.capture
     rgb, dep = capture()
     board = ctx.board_det.detect(

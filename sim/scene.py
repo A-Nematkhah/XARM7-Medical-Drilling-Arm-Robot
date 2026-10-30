@@ -23,6 +23,11 @@ CAM_W, CAM_H, CAM_FOVY = 640, 360, 42.0
 # Optical axis looks along +X (out of the palm), image-up = +Y (index side).
 CAM_POS = (0.004, 0.072, 0.030)
 
+# Table frame: xArm base sits a little toward robot-left (+Y) of the origin
+# so left-side wrap has more room in front of the shoulder. Workspace gates
+# stay in world / hardware coordinates and are not shifted with this pose.
+ROBOT_BASE_POS = np.array([0.0, 0.03, 0.0])
+
 # Workpiece: a vertical plywood board the robot will drill into.
 # Face area is 1.5x the original (Y/Z scaled by sqrt(1.5)); raised for easier angled drills.
 _BOARD_FACE_SCALE = np.sqrt(1.5)
@@ -34,10 +39,123 @@ HOLE_YZ = np.array([0.02, -0.01])
 MARKER_INSET = 0.030
 # Sim spawn keeps BOARD_POS / yaw=0 fixed. Each run jitters the face mark
 # (hole_yz) and the drill XY in a patch left of the board (+Y). Board +Y edge
-# is ~-0.18 m.
-DRILL_SPAWN_LO = np.array([0.30, -0.14])
-DRILL_SPAWN_HI = np.array([0.58, 0.28])
+# is ~-0.18 m. The box is clipped so a robot-left 16 cm wrap keeps TCP *and*
+# hand/wrist/LiDAR samples inside gates.yaml workspace.x/y.
+_WS_X = (0.15, 0.75)
+_WS_Y = (-0.55, 0.45)
+_LEFT_SLIDE = 0.16
+_LEFT_OUT = 0.06
+_LEFT_STANDOFF = 0.008
+_SPAWN_WS_MARGIN = 0.012
 DRILL_YAW_LIM_DEG = 25.0
+_UP = np.array([0.0, 0.0, 1.0])
+# Grasp-frame envelope used for spawn (must match SafetyGates HAND+TABLE).
+_GRASP_HAND_SAMPLES = np.array([
+    [0.00, 0.00, 0.00],
+    [0.00, 0.00, 0.10],
+    [0.00, 0.00, 0.14],
+    [0.00, 0.05, 0.10],
+    [0.00, -0.04, 0.08],
+    [-0.06, 0.00, 0.05],
+    [-0.10, 0.03, 0.03],
+    [-0.02, -0.08, -0.10],
+    [-0.12,  0.00,  0.00],
+    [-0.16,  0.00,  0.00],
+    [-0.18,  0.03, -0.04],
+    [-0.18, -0.04, -0.04],
+    [-0.14,  0.00, -0.08],
+], float)
+
+
+def _robot_left_sign(origin_xy, bz_xy, offset):
+    """Sign that puts `origin + offset*sign*bz` at the larger world-Y (robot left)."""
+    o = np.asarray(origin_xy, float).reshape(2)
+    lat = np.asarray(bz_xy, float).reshape(2)
+    nrm = float(np.linalg.norm(lat))
+    if nrm < 1e-9:
+        return 1.0
+    lat = lat / nrm
+
+    def world_y(sign):
+        return float((o + float(offset) * float(sign) * lat)[1])
+
+    return 1.0 if world_y(1.0) >= world_y(-1.0) else -1.0
+
+
+def _left_grasp_frame(yaw):
+    """Primary wrap Rg = [a, world-up, a×up], same as `_grasp_pose_from_est`."""
+    c, s = float(np.cos(yaw)), float(np.sin(yaw))
+    a = np.array([c, s, 0.0])
+    bz = np.cross(a, _UP)
+    bn = float(np.linalg.norm(bz))
+    bz = bz / bn if bn > 1e-9 else np.array([0.0, -1.0, 0.0])
+    Rg = np.column_stack([a, _UP, bz])
+    return a, bz, Rg
+
+
+def left_grasp_tcp_xy(drill_xy, yaw, slide=_LEFT_SLIDE, out=_LEFT_OUT,
+                      standoff=_LEFT_STANDOFF):
+    """World XY of (entry, slide) TCP for a robot-left wrap at `yaw` rad."""
+    xy = np.asarray(drill_xy, float).reshape(2)
+    a, bz, _Rg = _left_grasp_frame(yaw)
+    sign = _robot_left_sign(xy, bz[:2], -float(slide))
+    bz_s = sign * bz[:2]
+    p_slide = xy - float(slide) * bz_s - float(standoff) * a[:2]
+    p_entry = p_slide - float(out) * bz_s
+    return p_entry, p_slide
+
+
+def left_grasp_hand_xy(drill_xy, yaw, slide=_LEFT_SLIDE, out=_LEFT_OUT,
+                       standoff=_LEFT_STANDOFF, samples=_GRASP_HAND_SAMPLES):
+    """World XY of TCP + hand/wrist/LiDAR samples at left entry, slide, grip."""
+    xy = np.asarray(drill_xy, float).reshape(2)
+    a, bz, Rg = _left_grasp_frame(yaw)
+    sign = _robot_left_sign(xy, bz[:2], -float(slide))
+    bz_s = sign * bz
+    p_grip = np.array([xy[0], xy[1], 0.0])
+    p_slide = p_grip - float(slide) * bz_s - float(standoff) * a
+    p_entry = p_slide - float(out) * bz_s
+    samp = np.asarray(samples, float).reshape(-1, 3)
+    pts = []
+    for p in (p_entry, p_slide, p_grip):
+        pts.append(p[:2])
+        world = p + (Rg @ samp.T).T
+        pts.append(world[:, :2])
+    return np.vstack(pts)
+
+
+def _left_grasp_xy_extent(yaw_lim_deg=DRILL_YAW_LIM_DEG):
+    """Max |hand/TCP − drill| over yaw, split by axis sign."""
+    x_pos = x_neg = y_pos = y_neg = 0.0
+    for yaw in np.linspace(-np.deg2rad(yaw_lim_deg), np.deg2rad(yaw_lim_deg), 13):
+        for d in left_grasp_hand_xy((0.0, 0.0), yaw):
+            x_pos = max(x_pos, float(d[0]))
+            x_neg = max(x_neg, -float(d[0]))
+            y_pos = max(y_pos, float(d[1]))
+            y_neg = max(y_neg, -float(d[1]))
+    return x_pos, x_neg, y_pos, y_neg
+
+
+def _spawn_box_in_left_workspace(lo=(0.30, -0.14), hi=(0.55, 0.28)):
+    """Clip spawn so left-wrap TCP and hand samples stay in the workspace."""
+    x_pos, x_neg, y_pos, y_neg = _left_grasp_xy_extent()
+    m = _SPAWN_WS_MARGIN
+    lo = np.array([
+        max(float(lo[0]), _WS_X[0] + x_neg + m),
+        max(float(lo[1]), _WS_Y[0] + y_neg + m),
+    ], float)
+    hi = np.array([
+        min(float(hi[0]), _WS_X[1] - x_pos - m),
+        min(float(hi[1]), _WS_Y[1] - y_pos - m),
+    ], float)
+    if not (lo[0] < hi[0] and lo[1] < hi[1]):
+        raise RuntimeError(
+            f"no drill spawn patch fits a robot-left slide inside the workspace "
+            f"(lo={lo}, hi={hi})")
+    return lo, hi
+
+
+DRILL_SPAWN_LO, DRILL_SPAWN_HI = _spawn_box_in_left_workspace()
 MIN_DRILL_BOARD_XY = 0.18
 # Extra standoff when the drill sits in front of the face (side-slide grasp).
 MIN_DRILL_FACE_XY = 0.24
@@ -236,7 +354,7 @@ def build_spec(drill_xy=(0.47, -0.02), drill_yaw=0.0,
     arm.meshdir = os.path.join(ROOT, "assets", "xarm7", "assets")
     for b in arm.bodies:
         b.gravcomp = 1.0      # like the xArm controller's gravity compensation
-    arm_frame = wb.add_frame(pos=[0, 0, 0])
+    arm_frame = wb.add_frame(pos=ROBOT_BASE_POS.tolist())
     arm_frame.attach_body(arm.body("link_base"), "", "")
 
     # ---------------- Inspire RH56E2 ----------------

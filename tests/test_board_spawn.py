@@ -31,6 +31,42 @@ def test_sample_board_keeps_pose_and_randomizes_mark():
         assert abs(hyz[1]) <= hz_m + 1e-12
 
 
+def test_grasp_hand_samples_match_gates():
+    from safety import SafetyGates
+
+    g = SafetyGates()
+    env = np.vstack([g.HAND_SAMPLES, g.TABLE_SAMPLES])
+    assert np.allclose(scene._GRASP_HAND_SAMPLES, env)
+
+
+def test_drill_spawn_left_slide_fits_workspace():
+    """Every spawn XY × yaw keeps left-wrap TCP and hand samples in the box."""
+    from safety import SafetyGates
+
+    g = SafetyGates()
+    lo, hi = scene.DRILL_SPAWN_LO, scene.DRILL_SPAWN_HI
+    assert hi[1] < 0.12  # LiDAR on the pinky side sticks past a TCP-only y_hi
+    assert lo[0] > 0.40  # wrist samples behind the palm need extra −X room
+    xs = np.linspace(lo[0], hi[0], 5)
+    ys = np.linspace(lo[1], hi[1], 5)
+    yaws = np.linspace(-np.deg2rad(scene.DRILL_YAW_LIM_DEG),
+                       np.deg2rad(scene.DRILL_YAW_LIM_DEG), 5)
+    for x in xs:
+        for y in ys:
+            for yaw in yaws:
+                pts = scene.left_grasp_hand_xy((x, y), yaw)
+                assert np.all(pts[:, 0] >= g.WS_X[0] - 1e-9), (pts, x, y, yaw)
+                assert np.all(pts[:, 0] <= g.WS_X[1] + 1e-9), (pts, x, y, yaw)
+                assert np.all(pts[:, 1] >= g.WS_Y[0] - 1e-9), (pts, x, y, yaw)
+                assert np.all(pts[:, 1] <= g.WS_Y[1] + 1e-9), (pts, x, y, yaw)
+
+
+def test_spawn_overlay_matches_scene_box():
+    from task.constants import SPAWN_DRILL_HI, SPAWN_DRILL_LO
+    assert np.allclose(SPAWN_DRILL_LO, scene.DRILL_SPAWN_LO, atol=1e-6)
+    assert np.allclose(SPAWN_DRILL_HI, scene.DRILL_SPAWN_HI, atol=1e-6)
+
+
 def test_sample_layout_drill_and_mark_jitter_on_fixed_board():
     rng = np.random.default_rng(0)
     left_edge = scene.board_left_y()
@@ -44,6 +80,17 @@ def test_sample_layout_drill_and_mark_jitter_on_fixed_board():
         assert float(xy[1]) > left_edge
         marks.append(np.asarray(hyz, float).copy())
     assert not np.allclose(marks[0], marks[1])
+
+
+def test_robot_base_is_nudged_left():
+    import mujoco
+
+    model, _ = scene.build_model()
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    y = float(data.xpos[int(model.body("link_base").id)][1])
+    assert y == pytest.approx(float(scene.ROBOT_BASE_POS[1]), abs=1e-9)
+    assert float(scene.ROBOT_BASE_POS[1]) > 0.0
 
 
 def test_build_model_shows_spawn_box_geom():

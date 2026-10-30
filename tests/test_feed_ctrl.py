@@ -105,3 +105,42 @@ def test_load_scale_takes_the_stricter_axis():
 def test_idle_rpm_does_not_derate():
     c = _loaded()
     assert c.load_scale(0.0, 1432.0) == pytest.approx(1.0)
+
+
+def test_tight_ctrl_tol_still_feeds_past_old_early_stop():
+    """Old loop stopped at 24.6 mm (0.4 * DEPTH_TOL). Crawl must continue."""
+    from task.constants import FEED_CTRL_TOL
+    c = DepthFeedCtrl(
+        target=0.025, vmax=0.012, kp=0.55, ki=0.0, vmin=0.0025,
+        max_step=0.004, tol=FEED_CTRL_TOL, dn=1.0)
+    step, speed = c.command(pen_m=0.0246, remaining_along=0.05, dt=0.22)
+    assert step > 1e-5
+    assert speed > 0.0
+    step0, speed0 = c.command(pen_m=0.025, remaining_along=0.05, dt=0.22)
+    assert step0 == 0.0 and speed0 == 0.0
+
+
+def test_aim_and_feed_tols_are_tighter_than_phase_gates():
+    from task.constants import AIM_LAT_TOL, DEPTH_TOL, ENTRY_HIT_PEN, FEED_CTRL_TOL, LAT_TOL
+    assert AIM_LAT_TOL < LAT_TOL
+    assert FEED_CTRL_TOL < DEPTH_TOL
+    assert ENTRY_HIT_PEN < 0.001
+
+
+def test_drill_loop_stops_at_target_and_captures_early_entry():
+    from pathlib import Path
+    text = (Path(__file__).resolve().parents[1] / "task" / "phases" / "drill.py").read_text(
+        encoding="utf-8")
+    assert "tol=FEED_CTRL_TOL" in text
+    assert "pen >= DRILL_DEPTH" in text
+    assert "0.4 * DEPTH_TOL" not in text
+    assert "ENTRY_HIT_PEN" in text
+
+
+def test_nudge_uses_aim_lat_tol_and_marker_refresh():
+    from pathlib import Path
+    text = (Path(__file__).resolve().parents[1] / "task" / "phases" / "approach.py").read_text(
+        encoding="utf-8")
+    assert "AIM_LAT_TOL" in text
+    assert "_refresh_marker_hole(ctx)" in text
+    assert "for _ in range(8):" in text
