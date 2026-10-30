@@ -1,0 +1,67 @@
+# Cartesian / joint speed profiles per task phase.
+# vmax = TCP speed cap (m/s). Duration = max(t_min, distance / vmax).
+# Sim min-jerk then stretches T so the *peak* stays under vmax (~1.875× mean).
+# feed.vmax should stay <= gates.yaml motion.max_feed_speed.
+
+scan:
+  vmax: 0.12
+  t_min: 1.5
+  settle: 0.20
+  joint_T: 2.5
+
+grasp:
+  vmax: 0.10
+  t_min: 0.5
+  settle: 0.10
+  joint_T: 2.0
+  joint_T_first: 2.0
+  joint_T_step: 0.55
+
+lift:
+  vmax: 0.10
+  t_min: 1.2
+  settle: 0.20
+
+relocate:
+  # Held drill away from / around the board (retreat → align → reorient).
+  vmax: 0.08
+  t_min: 1.2
+  settle: 0.20
+  joint_T: 2.5
+
+approach:
+  # Visual-servo near the face — slower and tighter.
+  vmax: 0.035
+  t_min: 0.35
+  settle: 0.08
+
+feed:
+  # Bit axis into the board. Hard-capped by gates max_feed_speed too.
+  # kp/ki close the loop on remaining depth (m/s per m of error).
+  vmax: 0.012
+  t_min: 0.22
+  settle: 0.03
+  kp: 0.55
+  ki: 0.10
+  vmin: 0.0025
+  max_step: 0.004
+  # Derate vmax when thrust is high or chuck RPM sags (stall-avoid).
+  f_nom: 3.5          # N; below this, no thrust derate
+  f_hi: 8.0           # N; at/above this, load_scale_min
+  rpm_nom: 1100       # full feed if chuck at/above this
+  rpm_lo: 400         # crawl toward stall abort (gates min_cut_spin)
+  load_scale_min: 0.25
+
+retract:
+  # Pull out after the hole — faster than feed, slower than relocate.
+  vmax: 0.06
+  t_min: 0.8
+  settle: 0.10
+
+place:
+  vmax: 0.08
+  t_min: 0.8
+  settle: 0.15
+  joint_T: 2.5
+  joint_T_first: 3.0
+  joint_T_step: 0.8

@@ -28,10 +28,20 @@ class GateError(RuntimeError):
     """Raised when a safety gate rejects the plan. Abort the task; do not continue."""
 
 
-def load_gate_limits(path: str | Path | None = None) -> dict:
-    """Load the gates YAML; missing file or missing PyYAML -> empty dict (class defaults)."""
+def load_gate_limits(path: str | Path | None = None, *, required: bool = False) -> dict:
+    """Load the gates YAML.
+
+    The default path may be missing (class defaults). An explicit path, or
+    `required=True`, raises `GateError` instead of silently substituting.
+    """
     p = Path(path) if path is not None else DEFAULT_GATES
-    if not p.is_file() or yaml is None:
+    if yaml is None:
+        if required or path is not None:
+            raise GateError("PyYAML is required to load safety gates")
+        return {}
+    if not p.is_file():
+        if required or path is not None:
+            raise GateError(f"gates file not found: {p}")
         return {}
     return yaml.safe_load(p.read_text(encoding="utf-8")) or {}
 
@@ -46,9 +56,13 @@ class SafetyGates:
     REAL_MIN_BIT_DOT = 0.75            # ~41 deg (hardware)
 
     # Grasp-site workspace in world (metres), in front of the xArm base.
+    # WS_Z is TCP-only: wrap-around grasp TCP sits near 4–12 cm. Hand / LiDAR
+    # hang below TCP — use check_hand_vs_table for the table, not a higher z min.
     WS_X = (0.15, 0.75)
     WS_Y = (-0.55, 0.45)
     WS_Z = (0.04, 0.70)
+    TABLE_Z = 0.0
+    TABLE_CLEAR = 0.015              # m, min hand/LiDAR sample height vs table
 
     MIN_GRIP_PTS = 20
     GRIP_RADIUS = (0.010, 0.030)
@@ -67,6 +81,7 @@ class SafetyGates:
     TRANSIT_MIN_CLEAR = -0.002         # m, abort only if the tip actually enters the face
     REORIENT_GRASP_STANDOFF = 0.28     # m, grasp-to-face before rotating a held drill
     BOARD_BODY_MARGIN = 0.012          # m, extra gap for hand/housing vs board plane
+    HAND_FACE_MARGIN = 0.045           # m, lateral pad when hand samples skim the face
     HOUSING_R = 0.032
     HOUSING_BEHIND_TIP = 0.145       # yellow housing front, not chuck
     CHUCK_BEHIND_TIP = 0.094
@@ -74,6 +89,7 @@ class SafetyGates:
     # Phase 5: stop on dry push / chuck contact (force-like gates).
     MAX_DRY_PEN = 0.002              # m into face without motor → abort
     MAX_BOARD_CONTACT_N = 25.0       # N; chuck↔board contact force (sim or F/T)
+    MIN_CUT_SPIN = 15.0              # rad/s; stall abort while the bit is in the face
     # grasp-frame samples of the hand/wrist (x=palm/bit, y=index, z=fingers)
     HAND_SAMPLES = np.array([
         [0.00, 0.00, 0.00],
@@ -84,11 +100,20 @@ class SafetyGates:
         [-0.06, 0.00, 0.05],
         [-0.10, 0.03, 0.03],
     ])
+    # Extra wrist / pinky-LiDAR samples used only vs the table (not the board slab).
+    TABLE_SAMPLES = np.array([
+        [-0.02, -0.08, -0.10],  # wrist LiDAR puck (pinky side)
+        [-0.12,  0.00,  0.00],
+        [-0.16,  0.00,  0.00],
+        [-0.18,  0.03, -0.04],
+        [-0.18, -0.04, -0.04],
+        [-0.14,  0.00, -0.08],
+    ])
 
     def __init__(self, real_robot=False, limits=None):
         self.real = bool(real_robot)
         self._copy_defaults()
-        if limits:
+        if limits is not None:
             self._apply_limits(limits)
         elif DEFAULT_GATES.is_file() and yaml is not None:
             self._apply_limits(load_gate_limits(DEFAULT_GATES))
@@ -99,23 +124,26 @@ class SafetyGates:
 
     @classmethod
     def from_file(cls, path=None, real_robot=False):
-        limits = load_gate_limits(path)
-        g = cls(real_robot=real_robot, limits=limits or None)
-        g.source = str(Path(path) if path is not None else DEFAULT_GATES)
+        p = Path(path) if path is not None else DEFAULT_GATES
+        limits = load_gate_limits(p, required=True)
+        g = cls(real_robot=real_robot, limits=limits)
+        g.source = str(p)
         return g
 
     def _copy_defaults(self):
         for name in (
             "MAX_TILT_DEG", "MAX_AZIM_DEG", "REAL_MAX_TILT_DEG", "REAL_MAX_AZIM_DEG",
             "MIN_BIT_DOT_NORMAL", "REAL_MIN_BIT_DOT",
-            "WS_X", "WS_Y", "WS_Z",
+            "WS_X", "WS_Y", "WS_Z", "TABLE_Z", "TABLE_CLEAR",
+            "TABLE_SAMPLES",
             "MIN_GRIP_PTS", "GRIP_RADIUS", "MIN_BOARD_PTS", "MIN_BOARD_INLIERS", "MIN_BOARD_NX",
             "MAX_HOLE_PRIOR_ERR",
             "MAX_TRACK_ERR", "MIN_JOINT_MARGIN", "MIN_LIFT", "MIN_LOADED_FINGERS", "FINGER_LOAD",
             "MAX_FEED_SPEED", "MIN_FEED_DOT", "MIN_AIM_CLEARANCE", "TRANSIT_MIN_CLEAR",
-            "REORIENT_GRASP_STANDOFF", "BOARD_BODY_MARGIN", "HOUSING_R", "HOUSING_BEHIND_TIP",
+            "REORIENT_GRASP_STANDOFF", "BOARD_BODY_MARGIN", "HAND_FACE_MARGIN",
+            "HOUSING_R", "HOUSING_BEHIND_TIP",
             "CHUCK_BEHIND_TIP", "CHUCK_R",
-            "MAX_DRY_PEN", "MAX_BOARD_CONTACT_N",
+            "MAX_DRY_PEN", "MAX_BOARD_CONTACT_N", "MIN_CUT_SPIN",
             "HAND_SAMPLES",
         ):
             setattr(self, name, getattr(type(self), name))
@@ -142,6 +170,10 @@ class SafetyGates:
             self.WS_Y = tuple(ws["y"])
         if "z" in ws:
             self.WS_Z = tuple(ws["z"])
+        if "table_z" in ws:
+            self.TABLE_Z = float(ws["table_z"])
+        if "table_clear" in ws:
+            self.TABLE_CLEAR = float(ws["table_clear"])
         perc = raw.get("perception") or {}
         if "min_grip_pts" in perc:
             self.MIN_GRIP_PTS = int(perc["min_grip_pts"])
@@ -168,18 +200,22 @@ class SafetyGates:
             "transit_min_clear": ("TRANSIT_MIN_CLEAR", float),
             "reorient_grasp_standoff": ("REORIENT_GRASP_STANDOFF", float),
             "board_body_margin": ("BOARD_BODY_MARGIN", float),
+            "hand_face_margin": ("HAND_FACE_MARGIN", float),
             "housing_r": ("HOUSING_R", float),
             "housing_behind_tip": ("HOUSING_BEHIND_TIP", float),
             "chuck_behind_tip": ("CHUCK_BEHIND_TIP", float),
             "chuck_r": ("CHUCK_R", float),
             "max_dry_pen": ("MAX_DRY_PEN", float),
             "max_board_contact_n": ("MAX_BOARD_CONTACT_N", float),
+            "min_cut_spin": ("MIN_CUT_SPIN", float),
         }
         for key, (attr, cast) in mapping.items():
             if key in mot:
                 setattr(self, attr, cast(mot[key]))
         if raw.get("hand_samples"):
             self.HAND_SAMPLES = np.asarray(raw["hand_samples"], float)
+        if raw.get("table_samples"):
+            self.TABLE_SAMPLES = np.asarray(raw["table_samples"], float)
 
     def check_perpendicular_milestone(self, tilt_deg, azim_deg, allow_angled=False):
         """Refuse non-zero tilt/azim until perpendicular drilling is unlocked."""
@@ -188,12 +224,12 @@ class SafetyGates:
         if abs(tilt_deg) > 1e-6 or abs(azim_deg) > 1e-6:
             raise GateError(
                 "angled drilling locked until perpendicular (tilt=azim=0) is stable; "
-                "pass --allow-angled, set milestone.allow_angled in calib.yaml, "
-                "or create config/angled_unlocked")
+                "pass --allow-angled, run scripts/unlock_angled.py, "
+                "or create config/angled_unlocked "
+                "(YAML milestone.allow_angled is ignored when milestone.strict is true)")
 
-    def check_drill_angles(self, tilt_deg, azim_deg, bit_dir, board_n, allow_angled=None):
-        if allow_angled is not None:
-            self.check_perpendicular_milestone(tilt_deg, azim_deg, allow_angled=allow_angled)
+    def check_drill_angles(self, tilt_deg, azim_deg, bit_dir, board_n, allow_angled=False):
+        self.check_perpendicular_milestone(tilt_deg, azim_deg, allow_angled=allow_angled)
         if abs(tilt_deg) > self.max_tilt + 1e-6:
             raise GateError(f"tilt {tilt_deg:.1f} deg exceeds ±{self.max_tilt:.0f} deg gate")
         if abs(azim_deg) > self.max_azim + 1e-6:
@@ -201,10 +237,10 @@ class SafetyGates:
         d = np.asarray(bit_dir, float); d = d / np.linalg.norm(d)
         n = np.asarray(board_n, float); n = n / np.linalg.norm(n)
         dn = float(d @ n)
-        if dn < self.min_dot:
-            raise GateError(f"bit vs board normal too steep (dot={dn:.3f}, need >={self.min_dot})")
         if dn <= 0:
             raise GateError("bit axis must point into the board (along the detected normal)")
+        if dn < self.min_dot:
+            raise GateError(f"bit vs board normal too steep (dot={dn:.3f}, need >={self.min_dot})")
 
     def check_workspace(self, p, name="pose"):
         p = np.asarray(p, float).reshape(3)
@@ -212,6 +248,24 @@ class SafetyGates:
         hi = np.array([self.WS_X[1], self.WS_Y[1], self.WS_Z[1]])
         if np.any(p < lo) or np.any(p > hi):
             raise GateError(f"{name} {np.round(p, 3)} outside workspace {lo}..{hi}")
+
+    def check_hand_vs_table(self, p, R, name="hand"):
+        """Reject poses where hand / wrist / LiDAR samples go through the table.
+
+        `check_workspace` is TCP-only; the pinky LiDAR sits ~8 cm below TCP when
+        palm Y is world-up. Transit must pass this; wrap-around grasp TCP may sit
+        near WS_Z min as long as samples stay above TABLE_Z + TABLE_CLEAR.
+        """
+        p = np.asarray(p, float).reshape(3)
+        R = np.asarray(R, float).reshape(3, 3)
+        samples = np.vstack([self.HAND_SAMPLES, self.TABLE_SAMPLES])
+        pts = p + (R @ samples.T).T
+        zmin = float(np.min(pts[:, 2]))
+        floor = float(self.TABLE_Z) + float(self.TABLE_CLEAR)
+        if zmin < floor:
+            raise GateError(
+                f"{name} would hit the table "
+                f"(sample z {zmin * 1000:.0f} mm < {floor * 1000:.0f} mm)")
 
     def check_perception(self, est, axis_hint=None):
         n_grip = int(est.n_points.get("grip", 0))
@@ -232,7 +286,7 @@ class SafetyGates:
 
     def check_grasp(self, finger_forces, loaded_idx=(0, 1, 2, 4)):
         f = np.abs(np.asarray(finger_forces, float))
-        n = int(np.sum(f[list(loaded_idx)] > self.FINGER_LOAD))
+        n = int(np.sum(f[list(loaded_idx)] >= self.FINGER_LOAD))
         if n < self.MIN_LOADED_FINGERS:
             raise GateError(f"grasp: {n} loaded fingers, need {self.MIN_LOADED_FINGERS}")
 
@@ -279,6 +333,11 @@ class SafetyGates:
                 f"{name} {err*1000:.1f} mm from prior (max {self.MAX_HOLE_PRIOR_ERR*1000:.0f} mm); "
                 f"likely the wrong mark")
 
+    def check_hole_on_face(self, hole, center, board_n, board_half, margin=0.01, name="hole"):
+        """Mark must lie on the detected face (not a calib XYZ prior)."""
+        if not on_board_face(hole, center, board_n, board_half, margin=margin):
+            raise GateError(f"{name} is not on the detected board face")
+
     def grasp_face_clearance(self, p_grasp, hole, board_n):
         """How far the grasp site is in front of the face (m)."""
         n = np.asarray(board_n, float); n = n / np.linalg.norm(n)
@@ -308,6 +367,28 @@ class SafetyGates:
         dist = self.tip_clearance(tip, hole_target, board_n)
         if dist < min_clear:
             raise GateError(f"trigger blocked: bit-to-face {dist*1000:.1f} mm < {min_clear*1000:.0f} mm")
+
+    def check_hand_vs_board(self, p_grasp, R, hole, board_n, board_half=None, name="hand"):
+        """Reject poses where hand/wrist samples enter the board slab (finite face).
+
+        Unlike `check_aim_clearance`, misses beside the calibrated face are allowed so
+        a sideways grasp past the board edge is not blocked by the infinite plane.
+        """
+        n = np.asarray(board_n, float); n = n / (np.linalg.norm(n) + 1e-12)
+        p = np.asarray(p_grasp, float)
+        face = np.asarray(hole, float)
+        pts = p + (np.asarray(R, float) @ self.HAND_SAMPLES.T).T
+        face_m = float(self.HAND_FACE_MARGIN)
+        for pt in pts:
+            pen = float((pt - face) @ n)
+            if pen <= -self.BOARD_BODY_MARGIN:
+                continue
+            if board_half is not None and not on_board_face(
+                    pt, hole, board_n, board_half, margin=face_m):
+                continue
+            raise GateError(
+                f"{name} would hit the board "
+                f"(plane clearance {-pen*1000:.1f} mm)")
 
     def check_aim_clearance(self, p_grasp, Rd, tip_in_hand, hole, board_n, along_d=0.0):
         """Reject poses where the hand or drill housing would penetrate the board plane."""
@@ -358,6 +439,17 @@ class SafetyGates:
             raise GateError(
                 f"board contact force {force_n:.1f} N exceeds "
                 f"{self.MAX_BOARD_CONTACT_N:.0f} N ({phase or 'hold'})")
+
+    def check_cut_spin(self, omega, pen_m, phase=""):
+        """Abort if the chuck is stalled while the bit is in the board."""
+        if float(pen_m) <= self.MAX_DRY_PEN:
+            return
+        if abs(float(omega)) < self.MIN_CUT_SPIN:
+            rpm = abs(float(omega)) * 60.0 / (2.0 * np.pi)
+            min_rpm = self.MIN_CUT_SPIN * 60.0 / (2.0 * np.pi)
+            raise GateError(
+                f"drill stalled during {phase or 'feed'}: chuck {rpm:.0f} rpm "
+                f"with tip {float(pen_m)*1000:.1f} mm in board (need >={min_rpm:.0f} rpm)")
 
     def feed_along_bit(self, standoff_m, depth_m, margin_m, bit_dot_normal):
         """Travel along the bit that yields (standoff + depth + margin) along the board normal.

@@ -1,8 +1,28 @@
 """Geometry helpers for bit aiming (independent of MuJoCo)."""
 import numpy as np
 
-from robot import mat2quat
 from .constants import UP
+
+
+def mat2quat(R):
+    """Rotation matrix → quaternion wxyz (same layout as MuJoCo)."""
+    R = np.asarray(R, float).reshape(3, 3)
+    t = float(np.trace(R))
+    if t > 0.0:
+        s = np.sqrt(t + 1.0) * 2.0
+        return np.array([0.25 * s, (R[2, 1] - R[1, 2]) / s,
+                         (R[0, 2] - R[2, 0]) / s, (R[1, 0] - R[0, 1]) / s])
+    if R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+        s = np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2.0
+        return np.array([(R[2, 1] - R[1, 2]) / s, 0.25 * s,
+                         (R[0, 1] + R[1, 0]) / s, (R[0, 2] + R[2, 0]) / s])
+    if R[1, 1] > R[2, 2]:
+        s = np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2]) * 2.0
+        return np.array([(R[0, 2] - R[2, 0]) / s, (R[0, 1] + R[1, 0]) / s,
+                         0.25 * s, (R[1, 2] + R[2, 1]) / s])
+    s = np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1]) * 2.0
+    return np.array([(R[1, 0] - R[0, 1]) / s, (R[0, 2] + R[2, 0]) / s,
+                     (R[1, 2] + R[2, 1]) / s, 0.25 * s])
 
 
 def rodrigues(v, axis, deg):
@@ -59,8 +79,14 @@ def ang_err_deg(a, b):
     return float(np.degrees(np.arccos(np.clip(a @ b, -1.0, 1.0))))
 
 
-def planar_err_mm(hit, target, normal):
-    n = np.asarray(normal, float); n = n / np.linalg.norm(n)
+def planar_err_mm(hit, target, normal, up=UP):
+    n = np.asarray(normal, float); n = n / (np.linalg.norm(n) + 1e-12)
     d = np.asarray(hit, float) - np.asarray(target, float)
-    lat = d - n * (d @ n)
-    return float(np.linalg.norm(lat) * 1000.0), float(lat[1] * 1000.0), float(lat[2] * 1000.0)
+    lat = d - n * float(d @ n)
+    u = np.asarray(up, float)
+    y = np.cross(n, u)
+    if np.linalg.norm(y) < 1e-8:
+        y = np.cross(n, np.array([1.0, 0.0, 0.0]))
+    y = y / (np.linalg.norm(y) + 1e-12)
+    z = np.cross(y, n); z = z / (np.linalg.norm(z) + 1e-12)
+    return float(np.linalg.norm(lat) * 1000.0), float(lat @ y * 1000.0), float(lat @ z * 1000.0)

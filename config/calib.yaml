@@ -1,9 +1,17 @@
-# Sim defaults (same numbers as sim/scene.py). Replace for hardware.
+# Sim defaults match sim/scene.py. On hardware: measure and replace every block
+# below (especially hand_eye, board, hardware). Never use MuJoCo BOARD_POS /
+# CAM_POS as live ground truth on the real robot.
 
 hand_eye:
   # Camera origin in grasp_site / TCP. R = Rz(yaw) Ry(pitch) Rx(roll).
+  # Measure with a hand-eye calibration routine; live cam.pose() = TCP FK × this.
   t: [-0.0254, 0.072, -0.0975]
   rpy_deg: [0.0, -90.0, 0.0]
+
+lidar_eye:
+  # 360° LiDAR on the hand (grasp_site / TCP). Coarse drill/board XY; D435i does pierce.
+  t: [-0.022, -0.078, -0.095]
+  rpy_deg: [180.0, 0.0, 0.0]
 
 tool:
   bit_reach: 0.2075        # grip axis -> bit tip (pre-grasp, on the table)
@@ -19,17 +27,46 @@ hand:
   force_scale: 1.0
 
 camera:
-  latency_s: 0.067    # ~2 frames @ 30 Hz (USB/ISP delay)
+  latency_s: 0.067    # ~2 frames @ 30 Hz (USB/ISP delay); sim noise model
   dropout: 0.02
   edge_noise_m: 0.003
   min_z: 0.105        # D435i stereo invalid below ~105 mm; marker uses RGB ray-plane
 
+cutting:
+  # Sim-only material resistance (axial thrust + chuck torque). Bit geoms stay
+  # non-colliding; hardware gets real cutting loads from the workpiece.
+  enabled: true
+  axial_n_per_m: 240.0
+  axial_damp_ns_per_m: 40.0
+  torque_nm_per_m: 4.0
+  viscous_nm_s: 0.0004
+
 board:
+  # Search prior only. After grasp, aim from BoardDetector (marker / plane).
+  # On hardware: measure board centre, outward normal, and face half-extents.
   position: [0.64, -0.34, 0.34]
   normal: [1.0, 0.0, 0.0]
   hole_yz: [0.02, -0.01]
   half: [0.012, 0.159217, 0.134722]   # metres; match sim/scene.py BOARD_HALF
 
+hardware:
+  # Used only by --backend real (xArm + RH56 + D435i).
+  arm_ip: "192.168.1.xxx"     # controller LAN IP
+  hand_port: ""               # e.g. COM3 or /dev/ttyUSB0
+  hand_baud: 115200
+  hand_slave_id: 1
+  rs_serial: ""               # optional RealSense serial; empty = first device
+  tcp_speed_mm_s: 80.0
+  joint_speed_deg_s: 30.0
+  connect_on_start: false     # true: open devices at process start
+
 milestone:
+  # Angled holes stay locked until perpendicular batch eval is stable.
+  # Unlock with: python scripts/unlock_angled.py
+  # Dev override only: --allow-angled
   allow_angled: false
+  strict: true
   unlock_file: config/angled_unlocked
+  min_perp_success: 0.8
+  min_perp_runs: 10
+  baseline_metrics: outputs/eval_batch.csv

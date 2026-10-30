@@ -14,7 +14,11 @@ real:
 workspace:
   x: [0.15, 0.75]
   y: [-0.55, 0.45]
+  # TCP box only. Grasp wrap sits near z=0.04; do not raise this or the
+  # wrap-around grip fails. Hand / LiDAR hang below TCP — table_clear.
   z: [0.04, 0.70]
+  table_z: 0.0
+  table_clear: 0.015          # min hand/LiDAR sample height vs the table
 
 perception:
   min_grip_pts: 20
@@ -36,12 +40,14 @@ motion:
   transit_min_clear: -0.002
   reorient_grasp_standoff: 0.28
   board_body_margin: 0.012
+  hand_face_margin: 0.045   # lateral pad for hand samples vs finite board face
   housing_r: 0.032
   housing_behind_tip: 0.145   # yellow motor housing front (not the chuck)
   chuck_behind_tip: 0.094     # chuck origin behind the bit tip
   chuck_r: 0.018
   max_dry_pen: 0.002            # m into face without motor → abort
   max_board_contact_n: 25.0     # N chuck/housing vs board (sim contact or F/T)
+  min_cut_spin: 15.0            # rad/s; stall abort while the bit is in the face
 
 # grasp-frame samples of the hand/wrist (x=palm/bit, y=index, z=fingers)
 hand_samples:
@@ -52,3 +58,12 @@ hand_samples:
   - [0.00, -0.04, 0.08]
   - [-0.06, 0.00, 0.05]
   - [-0.10, 0.03, 0.03]
+
+# Extra wrist / pinky-LiDAR samples vs the table only (not the board slab).
+table_samples:
+  - [-0.02, -0.08, -0.10]
+  - [-0.12,  0.00,  0.00]
+  - [-0.16,  0.00,  0.00]
+  - [-0.18,  0.03, -0.04]
+  - [-0.18, -0.04, -0.04]
+  - [-0.14,  0.00, -0.08]

@@ -4,8 +4,9 @@ import numpy as np
 import pytest
 
 from calibration import (
-    BoardCalib, CalibConfig, HandEyeCalib, camera_pose_from_tcp, hole_from_prior,
-    load_calib, on_board_face, rpy_deg_to_R, tcp_from_camera,
+    BoardCalib, CalibConfig, HandEyeCalib, camera_pose_from_base,
+    camera_pose_from_tcp, hole_from_prior, load_calib, on_board_face,
+    rpy_deg_from_R, rpy_deg_to_R, tcp_from_camera,
 )
 
 
@@ -20,13 +21,19 @@ def test_load_default_calib_yaml():
     assert cfg.board.half[0] == pytest.approx(0.012)
     assert np.allclose(cfg.hand_eye.t, [-0.0254, 0.072, -0.0975])
     assert np.allclose(cfg.hand_eye.rpy_deg, [0.0, -90.0, 0.0])
+    assert np.allclose(cfg.lidar_eye.t, [-0.022, -0.078, -0.095])
+    assert np.allclose(cfg.lidar_eye.rpy_deg, [180.0, 0.0, 0.0])
     assert cfg.tool.bit_reach == pytest.approx(0.2075)
     assert cfg.tool.housing_to_tip == pytest.approx(0.2115)
     assert cfg.tool.held_bit_reach == pytest.approx(0.202)
     assert cfg.tool.chuck_behind_tip == pytest.approx(0.094)
     assert cfg.hand.force_scale == pytest.approx(1.0)
     assert cfg.camera.min_z == pytest.approx(0.105)
+    assert cfg.cutting.enabled is True
+    assert cfg.cutting.axial_n_per_m == pytest.approx(240.0)
     assert cfg.milestone.allow_angled is False
+    assert cfg.milestone.strict is True
+    assert cfg.hardware.arm_ip.startswith("192.168.")
 
 
 def test_on_board_face_uses_detected_hole_and_calib_half():
@@ -54,6 +61,22 @@ def test_rpy_minus_90_pitch_is_optical_mount():
     assert np.allclose(R, [[0, 0, -1], [0, 1, 0], [1, 0, 0]])
 
 
+def test_rpy_roundtrip():
+    rpy = np.array([-56.332864, 0.0, 92.385944])
+    assert np.allclose(rpy_deg_from_R(rpy_deg_to_R(rpy)), rpy, atol=1e-6)
+
+
+def test_camera_pose_from_base_uses_link_offset():
+    from calibration import BaseEyeCalib
+    be = BaseEyeCalib(t=np.array([0.04, -0.20, 0.50]),
+                      rpy_deg=np.array([-56.332864, 0.0, 92.385944]))
+    p_b = np.array([0.0, 0.0, 0.12])
+    R_b = np.eye(3)
+    p, R = camera_pose_from_base(p_b, R_b, be)
+    assert np.allclose(p, [0.04, -0.20, 0.62])
+    assert np.allclose(R, rpy_deg_to_R(be.rpy_deg))
+
+
 def test_camera_pose_roundtrip_tcp():
     he = HandEyeCalib()
     p_ee = np.array([0.4, 0.0, 0.3])
@@ -66,6 +89,7 @@ def test_camera_pose_roundtrip_tcp():
 
 def test_angled_unlocked_via_cli_flag():
     cfg = CalibConfig()
+    cfg.milestone.unlock_file = "config/angled_unlocked_missing_for_test"
     assert cfg.angled_unlocked(cli_allow=True) is True
     assert cfg.angled_unlocked(cli_allow=False) is False
 

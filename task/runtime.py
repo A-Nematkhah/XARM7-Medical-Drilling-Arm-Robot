@@ -6,7 +6,8 @@ import numpy as np
 from calibration import on_board_face
 from safety import GateError
 
-from .constants import MOTOR_SPEED
+from cutting import apply_cutting
+from .constants import INDEX_TRIGGER_ON, MOTOR_SPEED
 from .geom import quat_align_z
 from .hand_io import index_angle, trigger_physically_engaged, trigger_pressed, trigger_released
 from .tip import estimated_penetration, measured_tip
@@ -26,10 +27,14 @@ def attach_sim_callbacks(ctx):
     def drill_logic():
         # Motor follows the index command, but only if the physical trigger
         # has actually moved (sim). On hardware the index *is* the switch.
-        pressed = trigger_pressed(ctx.hand) and trigger_physically_engaged(ctx)
-        if not st["motor"] and pressed:
+        idx = index_angle(ctx.hand)
+        phys = trigger_physically_engaged(ctx)
+        firm = trigger_pressed(ctx.hand)  # index <= INDEX_TRIGGER_ON
+        soft = phys and idx <= INDEX_TRIGGER_ON + 80
+        # Firm index close is enough (pad contact sometimes never moves trig qpos).
+        # Soft band still needs physical travel so a half-closed finger cannot latch.
+        if not st["motor"] and (firm or soft):
             st["motor"] = True
-            idx = index_angle(ctx.hand)
             ctx.log(f"trigger pulled (index {idx}) -> motor ON")
             ctx.runlog.event(st["phase"], "motor", on=True, index=idx)
         elif st["motor"] and trigger_released(ctx.hand):
@@ -46,10 +51,25 @@ def attach_sim_callbacks(ctx):
             tip = measured_tip(ctx)
             hole, n = st["hole"], st["board_n"]
             hit = tip + ctx.gates.tip_clearance(tip, hole, n) * np.asarray(n, float)
-            if on_board_face(hit, hole, n, ctx.calib.board.half):
+            on_face = on_board_face(hit, hole, n, ctx.calib.board.half)
+            if on_face:
                 # Phase 5: dry push aborts — do not ghost through without spinning.
                 ctx.gates.check_dry_cut(pen_est, st["motor"], st["phase"])
+            bit_dir = np.asarray(st.get("drill_dir", n), float)
+            loads = apply_cutting(
+                model, data, tip=tip, bit_dir=bit_dir, pen_m=pen_est if on_face else 0.0,
+                motor_on=bool(st["motor"]), cfg=ctx.calib.cutting, tip_site=ctx.tip_site)
+            st["cut_force_now"] = float(loads["force_n"])
+            st["chuck_rpm"] = loads["rpm"]
+            if on_face and st["motor"]:
+                ctx.gates.check_cut_spin(loads["omega"], pen_est, st["phase"])
+                st["cut_force_n"] = max(float(st.get("cut_force_n") or 0.0), loads["force_n"])
+                st["cut_torque_nm"] = max(float(st.get("cut_torque_nm") or 0.0), abs(loads["torque_nm"]))
             _paint_viewer_hole()
+        else:
+            apply_cutting(
+                model, data, tip=np.zeros(3), bit_dir=np.array([1.0, 0.0, 0.0]),
+                pen_m=0.0, motor_on=False, cfg=ctx.calib.cutting, tip_site=-1)
 
     def _paint_viewer_hole():
         """Viewer disc only. Uses the detected plane and calibrated face size."""
@@ -96,22 +116,29 @@ def attach_sim_callbacks(ctx):
         return total
 
     def board_collision_guard():
-        if not st["holding"]:
-            return
         ph = str(st["phase"])
-        # Geometry gate (works on hardware without ncon). Skip during feed while
-        # the bit is intentionally past the face — housing samples still apply via
-        # check_aim_clearance at approach; here we only watch non-drill phases.
-        if (not ph.startswith(("7/", "FAILED"))) and ctx.tip_in_hand is not None:
-            p, R = ctx.robot.site_pose()
-            ctx.gates.check_held_clearance(
-                p, R, ctx.tip_in_hand, st["hole"], st["board_n"], ph)
+        # Grasp approach (3/8) can skim the board when the drill is nearby; abort on
+        # real MuJoCo contact even before holding. Geometry held-check starts after grasp.
+        if st["holding"]:
+            # Geometry gate (works on hardware without ncon). Skip during feed while
+            # the bit is intentionally past the face — housing samples still apply via
+            # check_aim_clearance at approach; here we only watch non-drill phases.
+            if (not ph.startswith(("7/", "FAILED"))) and ctx.tip_in_hand is not None:
+                p, R = ctx.robot.site_pose()
+                ctx.gates.check_held_clearance(
+                    p, R, ctx.tip_in_hand, st["hole"], st["board_n"], ph)
 
-        # Phase 5: chuck↔board is real contact. Force gate always; body hit aborts
-        # even when motor is on (over-feed into the chuck housing).
-        force_n = _board_contact_force()
-        if force_n > 0.0:
-            ctx.gates.check_board_contact_force(force_n, ph)
+            # Phase 5: chuck↔board is real contact. Force gate always; body hit aborts
+            # even when motor is on (over-feed into the chuck housing).
+            force_n = _board_contact_force()
+            if force_n > 0.0:
+                ctx.gates.check_board_contact_force(force_n, ph)
+        elif not ph.startswith("3/"):
+            return
+
+        # During feed the chuck may rest on the face; the force gate is the abort.
+        if ph.startswith(("7/", "FAILED")):
+            return
         ncon = getattr(data, "ncon", None)
         if ncon is None:
             return
@@ -155,3 +182,45 @@ def attach_sim_callbacks(ctx):
                         ctx.runlog.event(st["phase"], "contact", other=other)
 
         ctx.robot.callbacks.append(_contact_dbg)
+
+
+def attach_hw_callbacks(ctx):
+    """Hardware-loop motor latch + geometry gates. No MuJoCo cutting wrench.
+
+    Attach on `--backend real`. Motor ON follows the index (the physical switch).
+    `check_cut_spin` runs only when a chuck-speed reading is present.
+    """
+    st = ctx.st
+
+    def motor_and_gates():
+        idx = index_angle(ctx.hand)
+        phys = trigger_physically_engaged(ctx)
+        firm = trigger_pressed(ctx.hand)
+        soft = phys and idx <= INDEX_TRIGGER_ON + 80
+        if not st["motor"] and (firm or soft):
+            st["motor"] = True
+            ctx.log(f"trigger pulled (index {idx}) -> motor ON")
+            ctx.runlog.event(st["phase"], "motor", on=True, index=idx)
+        elif st["motor"] and trigger_released(ctx.hand):
+            st["motor"] = False
+            ctx.log("trigger released -> motor OFF")
+            ctx.runlog.event(st["phase"], "motor", on=False)
+
+        if not st["holding"] or ctx.tip_in_hand is None:
+            return
+        ph = str(st["phase"])
+        p, R = ctx.robot.site_pose()
+        if not ph.startswith(("7/", "FAILED")):
+            ctx.gates.check_held_clearance(
+                p, R, ctx.tip_in_hand, st["hole"], st["board_n"], ph)
+            ctx.gates.check_transit_tip(
+                measured_tip(ctx), st["hole"], st["board_n"], ph,
+                board_half=ctx.calib.board.half)
+        pen = estimated_penetration(ctx)
+        ctx.gates.check_dry_cut(pen, st["motor"], ph)
+        rpm = st.get("chuck_rpm")
+        if rpm is not None and st["motor"] and pen > ctx.gates.MAX_DRY_PEN:
+            omega = float(rpm) * 2.0 * np.pi / 60.0
+            ctx.gates.check_cut_spin(omega, pen, ph)
+
+    ctx.robot.callbacks.append(motor_and_gates)

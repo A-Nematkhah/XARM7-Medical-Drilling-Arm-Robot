@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from lidar import WristLidar
 from perception import D435i
 from robot import Robot
 
@@ -12,10 +13,12 @@ class SimBackend:
     arm: Robot
     hand: object
     camera: D435i
+    lidar: WristLidar | None = None
 
 
 def make_sim_backend(model, data, *, noise=True, seed=0, site="grasp_site",
-                     hand_eye=None, force_scale=1.0, camera_calib=None) -> SimBackend:
+                     hand_eye=None, force_scale=1.0, camera_calib=None,
+                     lidar_eye=None, **_ignored) -> SimBackend:
     arm = Robot(model, data, site=site)
     arm.hand.force_scale = float(force_scale)
     cam_kw = {}
@@ -30,4 +33,9 @@ def make_sim_backend(model, data, *, noise=True, seed=0, site="grasp_site",
         cam_kw["min_z"] = float(getattr(camera_calib, "min_z", 0.105))
     cam = D435i(model, data, noise=noise, seed=seed,
                 hand_eye=hand_eye, tcp_pose_fn=arm.site_pose, **cam_kw)
-    return SimBackend(arm=arm, hand=arm.hand, camera=cam)
+    lidar = None
+    if lidar_eye is not None:
+        lidar = WristLidar(
+            model, data, lidar_eye=lidar_eye, tcp_pose_fn=arm.site_pose,
+            noise=noise, seed=(seed or 0) + 31)
+    return SimBackend(arm=arm, hand=arm.hand, camera=cam, lidar=lidar)

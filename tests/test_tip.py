@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from safety import SafetyGates
 
 from task.tip import bind_tip_in_hand, estimated_penetration, measured_tip
@@ -44,6 +45,28 @@ def test_estimated_penetration_past_detected_face():
     )
     # estimated tip at x=0.6, face at x=0.55 -> 50 mm past the face
     assert abs(estimated_penetration(ctx) - 0.05) < 1e-9
+
+
+def test_tip_from_housing_axis_follows_lateral_offset():
+    from task.tip import tip_from_housing_axis
+
+    tcp = np.array([0.40, 0.0, 0.20])
+    axis = np.array([1.0, 0.0, 0.0])
+    # Housing cloud centred 80 mm along the bit and 70 mm above the TCP.
+    rng = np.random.default_rng(0)
+    xy = rng.normal(0.0, 0.004, size=(80, 2))
+    pts = np.column_stack([np.full(80, 0.48), tcp[1] + xy[:, 0], tcp[2] + 0.070 + xy[:, 1]])
+    prior = np.array([0.48 + 0.2115, 0.0, 0.270])
+    tip = tip_from_housing_axis(pts, tcp, axis, housing_to_tip=0.2115, prior=prior)
+    assert tip is not None
+    assert tip[0] == pytest.approx(0.48 + 0.2115, abs=0.005)
+    assert tip[2] == pytest.approx(0.270, abs=0.005)
+
+
+def test_tip_from_housing_cloud_rejects_empty():
+    from task.tip import tip_from_housing_cloud
+
+    assert tip_from_housing_cloud(np.zeros((0, 3)), [0, 0, 0], [1, 0, 0], 0.2) is None
 
 
 def test_bind_tip_in_hand_uses_actual_tcp():

@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import cv2
 import mujoco
-from calibration import board_axes, camera_pose_from_tcp, intersect_ray_plane
+from calibration import board_axes, camera_pose_from_base, camera_pose_from_tcp, intersect_ray_plane
 
 
 def contour_circularity(cnt):
@@ -68,6 +68,7 @@ class D435i:
     def __init__(self, model, data, name="d435i_color", width=640, height=360,
                  noise=True, seed=0, min_z=0.105, max_z=3.0,
                  hand_eye=None, tcp_pose_fn=None,
+                 base_eye=None, base_pose_fn=None,
                  latency_s=0.0, dropout=0.01, edge_noise_m=0.0):
         self.m, self.d = model, data
         self.cam = model.camera(name).id
@@ -82,6 +83,8 @@ class D435i:
         self.min_z, self.max_z = min_z, max_z
         self.hand_eye = hand_eye
         self.tcp_pose_fn = tcp_pose_fn
+        self.base_eye = base_eye
+        self.base_pose_fn = base_pose_fn
         self.latency_s = float(latency_s)
         self.dropout = float(dropout)
         self.edge_noise_m = float(edge_noise_m)
@@ -130,8 +133,9 @@ class D435i:
                 z[edge] = z[edge] + self.rng.normal(
                     0, self.edge_noise_m, int(edge.sum())).astype(np.float32)
             z = np.round(z * 1000) / 1000
-            drop = max(self.dropout, 0.01)
-            z[self.rng.random(z.shape) < drop] = 0
+            drop = max(float(self.dropout), 0.0)
+            if drop > 0.0:
+                z[self.rng.random(z.shape) < drop] = 0
         z[(z < self.min_z) | (z > self.max_z)] = 0
         self._frame_buf.append((rgb, z))
         if len(self._frame_buf) <= self._latency_frames:
@@ -148,6 +152,12 @@ class D435i:
         if self.hand_eye is not None and self.tcp_pose_fn is not None:
             p_ee, R_ee = self.tcp_pose_fn()
             return camera_pose_from_tcp(p_ee, R_ee, self.hand_eye)
+        if self.base_eye is not None:
+            if self.base_pose_fn is not None:
+                p_b, R_b = self.base_pose_fn()
+            else:
+                p_b, R_b = np.zeros(3), np.eye(3)
+            return camera_pose_from_base(p_b, R_b, self.base_eye)
         return self.mujoco_pose()
 
     def deproject(self, us, vs, zs, cam_pose=None):
@@ -218,7 +228,7 @@ class DrillDetector:
         return self.cam.deproject(us.astype(float), vs.astype(float), depth[vs, us], cam_pose)
 
     def detect_coarse(self, rgb, depth, cam_pose):
-        """First look (e.g. top-down): drill centroid + axis. Used to plan the side view."""
+        """First look (top-down): drill centroid + axis. Seeds the full top-down detect."""
         ym = self._mask(rgb, self.YELLOW_LO, self.YELLOW_HI)
         P = self._cloud(ym, depth, cam_pose)
         P = P[P[:, 2] > self.table_z + 0.01]
@@ -303,13 +313,26 @@ class DrillDetector:
         ax2 = axis[:2] / (np.linalg.norm(axis[:2]) + 1e-12)
         along_g = float((grip_xy - c) @ ax2)
         grip_xy = c + along_g * ax2
-        bit_tip = np.array([*(grip_xy + self.bit_reach * ax2), z_axis])
+        bit_tip = np.array([*(c + self.housing_to_tip * ax2), z_axis])
 
         est = DrillEstimate(grip_xy=grip_xy, axis=axis, housing_underside_z=float(underside),
                             housing_axis_z=float(z_axis), bit_tip=bit_tip, grip_radius=r_grip,
                             n_points=dict(drill=len(P), housing=len(H), grip=len(G), bit=len(S)))
         self.last_debug = dict(yellow=ym, silver=sm)
         return est
+
+    def observe_held_tip(self, rgb, depth, cam_pose, tcp, axis, held_along, prior=None):
+        """Live tip while held: housing centre + CAD reach along the bit axis.
+
+        `held_along` here is `housing_to_tip` (not TCP→tip). Yellow depth is
+        trusted; the thin silver bit often is not.
+        """
+        from task.tip import tip_from_housing_axis
+
+        ym = self._mask(rgb, self.YELLOW_LO, self.YELLOW_HI)
+        P = self._cloud(ym, depth, cam_pose)
+        return tip_from_housing_axis(
+            P, tcp, axis, housing_to_tip=held_along, prior=prior)
 
     def draw(self, rgb, est: DrillEstimate, cam_pose):
         """Overlay the estimate on the image (for the demo video)."""
@@ -363,7 +386,7 @@ class BoardDetector:
         self.last_marker_mask = None
 
     def detect(self, rgb, depth, cam_pose, normal_hint=None, min_pts=400,
-               search_center=None, search_radius=0.40):
+               search_center=None, search_radius=0.40, require_target=True):
         P, mk = self._board_cloud(
             rgb, depth, cam_pose, min_pts, search_center, search_radius)
         self.last_mask = mk
@@ -377,7 +400,12 @@ class BoardDetector:
             normal = -normal
         normal = normal / np.linalg.norm(normal)
 
-        hole, source, px = self._resolve_hole(rgb, depth, cam_pose, center, normal)
+        try:
+            hole, source, px = self._resolve_hole(rgb, depth, cam_pose, center, normal)
+        except RuntimeError:
+            if require_target:
+                raise
+            hole, source, px = self._offset_hole(center, normal), "offset", None
         return BoardEstimate(point=center, normal=normal, hole=hole,
                              n_points=len(P), inlier_ratio=float(ratio),
                              target_source=source, target_px=px)

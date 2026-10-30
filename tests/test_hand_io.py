@@ -13,6 +13,11 @@ def test_trigger_pressed_from_index_angle():
     assert trigger_pressed(hand)
     assert not trigger_released(hand)
     assert index_angle(hand) == 50
+    # Contact pad often leaves the encoder around 400–420; ON must cover that.
+    from task.constants import INDEX_TRIGGER_ON
+    assert INDEX_TRIGGER_ON >= 450
+    hand408 = SimpleNamespace(get_angles=lambda: [0, 0, 0, 408, 0, 0])
+    assert trigger_pressed(hand408)
 
 
 def test_trigger_released_when_index_extended():

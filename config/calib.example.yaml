@@ -7,6 +7,11 @@ hand_eye:
   t: [-0.0254, 0.072, -0.0975]
   rpy_deg: [0.0, -90.0, 0.0]
 
+lidar_eye:
+  # 360° LiDAR on the hand (grasp_site / TCP). Coarse drill/board XY; D435i does pierce.
+  t: [-0.022, -0.078, -0.095]
+  rpy_deg: [180.0, 0.0, 0.0]
+
 tool:
   bit_reach: 0.2075        # grip axis -> bit tip (pre-grasp)
   housing_to_tip: 0.2115   # housing-axis centre -> bit tip (CAD)
@@ -25,6 +30,13 @@ camera:
   edge_noise_m: 0.003 # extra σ on depth discontinuities
   min_z: 0.105        # stereo min range (m); pierce-standoff uses RGB only
 
+cutting:
+  enabled: true
+  axial_n_per_m: 240.0
+  axial_damp_ns_per_m: 40.0
+  torque_nm_per_m: 4.0
+  viscous_nm_s: 0.0004
+
 board:
   # Search prior only. After grasp, aim from BoardDetector (marker / plane).
   position: [0.64, -0.34, 0.34]
@@ -32,8 +44,23 @@ board:
   hole_yz: [0.02, -0.01]   # planar Y/Z offset of the target from board centre
   half: [0.012, 0.159217, 0.134722]   # metres (thickness, Y, Z); replace on hardware
 
+hardware:
+  arm_ip: "192.168.1.xxx"
+  hand_port: "COM3"
+  hand_baud: 115200
+  hand_slave_id: 1
+  rs_serial: ""
+  tcp_speed_mm_s: 80.0
+  joint_speed_deg_s: 30.0
+  connect_on_start: false
+
 milestone:
-  # Keep false until perpendicular (tilt=azim=0) entry/depth metrics are stable.
-  # Or create an empty file at unlock_file, or pass --allow-angled once.
+  # Keep false until perpendicular (tilt=azim=0) batch eval meets min_perp_*.
+  # Then: python scripts/unlock_angled.py
+  # Do not set allow_angled: true under strict: true — use the unlock script.
   allow_angled: false
+  strict: true
   unlock_file: config/angled_unlocked
+  min_perp_success: 0.8
+  min_perp_runs: 10
+  baseline_metrics: outputs/eval_batch.csv

@@ -35,28 +35,34 @@ def test_perpendicular_angles_pass():
 def test_sim_allows_moderate_tilt():
     g = SafetyGates()
     d = _bit(tilt_deg=15, azim_deg=10)
-    g.check_drill_angles(15, 10, d, N)
+    g.check_drill_angles(15, 10, d, N, allow_angled=True)
 
 
 def test_tilt_over_sim_limit_fails():
     g = SafetyGates()
     d = _bit(tilt_deg=40)
     with pytest.raises(GateError, match="tilt"):
-        g.check_drill_angles(40, 0, d, N)
+        g.check_drill_angles(40, 0, d, N, allow_angled=True)
 
 
 def test_real_robot_uses_tighter_angle_limits():
     g = SafetyGates(real_robot=True)
     d = _bit(tilt_deg=25)
     with pytest.raises(GateError, match="tilt"):
-        g.check_drill_angles(25, 0, d, N)
-    g.check_drill_angles(15, 10, _bit(15, 10), N)
+        g.check_drill_angles(25, 0, d, N, allow_angled=True)
+    g.check_drill_angles(15, 10, _bit(15, 10), N, allow_angled=True)
+
+
+def test_angled_locked_by_default():
+    g = SafetyGates()
+    d = _bit(tilt_deg=15, azim_deg=10)
+    with pytest.raises(GateError, match="angled drilling locked"):
+        g.check_drill_angles(15, 10, d, N)
 
 
 def test_outward_bit_fails():
-    # With board normal +X, an outward bit has dn < 0 so the steepness gate fires first.
     g = SafetyGates()
-    with pytest.raises(GateError, match="too steep"):
+    with pytest.raises(GateError, match="into the board"):
         g.check_drill_angles(0, 0, -N, N)
 
 
@@ -74,6 +80,29 @@ def test_workspace_box():
     g.check_workspace([0.40, 0.0, 0.20], "ok")
     with pytest.raises(GateError, match="outside workspace"):
         g.check_workspace([1.5, 0.0, 0.20], "aim")
+
+
+def test_hand_vs_table_is_not_tcp_box():
+    """TCP z=0.05 is inside the workspace box; the LiDAR puck is not."""
+    g = SafetyGates()
+    R = np.eye(3)
+    g.check_workspace([0.40, 0.0, 0.05], "grasp")
+    with pytest.raises(GateError, match="table"):
+        g.check_hand_vs_table([0.40, 0.0, 0.05], R, name="hover")
+    g.check_hand_vs_table([0.40, 0.0, 0.22], R, name="hover")
+
+
+def test_table_clear_loads_from_yaml():
+    g = SafetyGates.from_file()
+    assert g.TABLE_Z == pytest.approx(0.0)
+    assert g.TABLE_CLEAR == pytest.approx(0.015)
+
+
+def test_grasp_counts_load_at_threshold():
+    g = SafetyGates()
+    g.check_grasp([0.4, 0.4, 0.4, 0.0, 0.4, 0.0])
+    with pytest.raises(GateError, match="loaded fingers"):
+        g.check_grasp([0.3, 0.3, 0.3, 0.0, 0.3, 0.0])
 
 
 def test_tracking_gate():
@@ -155,3 +184,20 @@ def test_perception_grip_points():
     bad = SimpleNamespace(n_points={"grip": 5}, grip_radius=0.018, axis=np.array([0.0, 1.0, 0.0]))
     with pytest.raises(GateError, match="grip points"):
         g.check_perception(bad)
+
+
+def test_hand_vs_board_allows_beside_face_rejects_on_face():
+    g = SafetyGates()
+    n = np.array([1.0, 0.0, 0.0])
+    hole = np.array([0.64, 0.0, 0.30])
+    half = np.array([0.012, 0.16, 0.13])
+    R = np.eye(3)
+    # In front of the face: clear.
+    g.check_hand_vs_board(hole - 0.20 * n, R, hole, n, board_half=half, name="ok")
+    # Through the infinite plane but far beside the face: allowed.
+    g.check_hand_vs_board(
+        hole + 0.02 * n + np.array([0.0, 0.55, 0.0]), R, hole, n,
+        board_half=half, name="beside")
+    # Into the face slab: blocked.
+    with pytest.raises(GateError, match="would hit the board"):
+        g.check_hand_vs_board(hole + 0.01 * n, R, hole, n, board_half=half, name="hit")

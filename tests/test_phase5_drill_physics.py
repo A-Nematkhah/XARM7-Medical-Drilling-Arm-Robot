@@ -32,6 +32,7 @@ def test_gates_yaml_loads_dry_cut_limits():
     g = SafetyGates.from_file()
     assert g.MAX_DRY_PEN == pytest.approx(0.002)
     assert g.MAX_BOARD_CONTACT_N == pytest.approx(25.0)
+    assert g.MIN_CUT_SPIN == pytest.approx(15.0)
     assert g.CHUCK_BEHIND_TIP == pytest.approx(0.094)
     assert g.CHUCK_R == pytest.approx(0.018)
 
@@ -133,6 +134,13 @@ def test_settle_capture_discards_motion_tainted_buffer():
     assert cam._n == 6
 
 
+def test_feed_overshoot_is_a_gate():
+    text = (ROOT / "task" / "phases" / "drill.py").read_text(encoding="utf-8")
+    assert "overshot target" in text
+    idx = text.find("overshot target")
+    assert "raise GateError" in text[idx - 200:idx]
+
+
 def test_gt_metrics_are_not_safety_gates():
     """entry_err_vs_gt / depth_gt must never appear in safety.py gate logic."""
     text = (ROOT / "sim" / "safety.py").read_text(encoding="utf-8")
@@ -145,3 +153,47 @@ def test_camera_calib_defaults_loaded():
     cfg = load_calib(ROOT / "config" / "calib.yaml")
     assert cfg.camera.latency_s == pytest.approx(0.067)
     assert cfg.camera.dropout == pytest.approx(0.02)
+    assert cfg.cutting.enabled is True
+    assert cfg.cutting.torque_nm_per_m > 0.0
+
+
+def test_cutting_loads_zero_until_motor_and_penetration():
+    from cutting import CuttingCalib, cutting_loads
+
+    cfg = CuttingCalib()
+    assert cutting_loads(0.025, 0.01, 80.0, False, cfg) == (0.0, 0.0)
+    assert cutting_loads(0.0, 0.01, 80.0, True, cfg) == (0.0, 0.0)
+    f, t = cutting_loads(0.025, 0.01, 80.0, True, cfg)
+    assert f > 1.0
+    assert t < 0.0  # opposes +omega
+    f2, t2 = cutting_loads(0.025, 0.01, -80.0, True, cfg)
+    assert f2 == pytest.approx(f)
+    assert t2 > 0.0
+
+
+def test_cut_spin_stall_aborts():
+    g = SafetyGates()
+    g.check_cut_spin(100.0, 0.025, "7/8")
+    g.check_cut_spin(0.0, 0.0, "approach")
+    with pytest.raises(GateError, match="stalled"):
+        g.check_cut_spin(1.0, 0.010, "7/8")
+
+
+def test_apply_cutting_writes_chuck_torque():
+    import mujoco
+    import scene
+    from cutting import CuttingCalib, apply_cutting
+
+    model, _ = scene.build_model()
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    tip = data.site_xpos[model.site("bit_tip").id].copy()
+    cfg = CuttingCalib()
+    loads = apply_cutting(
+        model, data, tip=tip, bit_dir=np.array([1.0, 0.0, 0.0]),
+        pen_m=0.025, motor_on=True, cfg=cfg, tip_site=int(model.site("bit_tip").id))
+    assert loads["force_n"] > 0.0
+    dof = int(model.jnt_dofadr[model.joint("chuck_spin").id])
+    assert abs(float(data.qfrc_applied[dof])) > 0.0
+    bid = int(model.body("drill").id)
+    assert float(np.linalg.norm(data.xfrc_applied[bid, :3])) > 0.0

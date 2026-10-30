@@ -1,4 +1,5 @@
 """Phase 3: live sensors from calib (hand-eye, forces, geometry collision, bit reach)."""
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -14,6 +15,25 @@ def test_view_planner_los_skips_without_model():
     he = HandEyeCalib()
     views = ViewPlanner(he, model=None)
     assert views.line_of_sight_clear(None, np.zeros(7), [np.zeros(3)], np.arange(7)) is True
+
+
+def test_look_at_rotation_parallel_up_is_finite():
+    R = look_at_rotation(np.array([0.0, 1.0, 0.0]), np.array([0.0, 1.0, 0.0]))
+    assert np.isfinite(R).all()
+    assert abs(np.linalg.det(R) - 1.0) < 1e-6
+
+
+def test_real_camera_project_matches_sim_shape():
+    from calibration import HandEyeCalib
+    from hw.real_backend import RealCamera
+
+    cam = RealCamera(hand_eye=HandEyeCalib(),
+                     tcp_pose_fn=lambda: (np.zeros(3), np.eye(3)))
+    pose = (np.zeros(3), np.eye(3))
+    uv, z = cam.project(np.array([[0.0, 0.0, -0.5], [0.1, 0.0, -0.5]]), cam_pose=pose)
+    assert uv.shape == (2, 2)
+    assert z.shape == (2,)
+    assert z[0] == pytest.approx(0.5)
 
 
 def test_view_planner_uses_hand_eye_translation_not_cam_xpos():
@@ -96,6 +116,13 @@ def test_hand_eye_matches_mujoco_camera_at_rest():
     R_gt = data.cam_xmat[model.camera("d435i_color").id].reshape(3, 3)
     assert np.linalg.norm(p_fk - p_gt) < 1e-4
     assert np.linalg.norm(R_fk - R_gt) < 1e-6
+
+
+def test_dropout_zero_is_allowed_and_housing_to_tip_is_used():
+    src = Path(__file__).resolve().parents[1] / "sim" / "perception.py"
+    text = src.read_text(encoding="utf-8")
+    assert "max(float(self.dropout), 0.0)" in text
+    assert "c + self.housing_to_tip * ax2" in text
 
 
 def test_load_calib_tool_and_hand_blocks():

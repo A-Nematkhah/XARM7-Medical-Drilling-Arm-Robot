@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+
+from cutting import CuttingCalib
 from pathlib import Path
 
 import numpy as np
@@ -47,6 +49,12 @@ def _as_vec2(v, default):
 # Camera origin in grasp_site / TCP (measured from the sim mount; replace on hardware).
 _DEFAULT_HAND_EYE_T = np.array([-0.0254, 0.072, -0.0975])
 _DEFAULT_HAND_EYE_RPY = np.array([0.0, -90.0, 0.0])
+# Base D435i in link_base (sim/scene.py mount). Replace with a measured T_base_cam.
+_DEFAULT_BASE_EYE_T = np.array([0.04, -0.20, 0.50])
+_DEFAULT_BASE_EYE_RPY = np.array([-56.332864, 0.0, 92.385944])
+# Wrist LiDAR in grasp_site / TCP (rh_base LIDAR_T minus grasp_site, Rx(180)).
+_DEFAULT_LIDAR_EYE_T = np.array([-0.022, -0.078, -0.095])
+_DEFAULT_LIDAR_EYE_RPY = np.array([180.0, 0.0, 0.0])
 _DEFAULT_BIT_REACH = 0.2075
 # Housing cylinder centre is 4 mm behind the grip axis (drill.xml body @ -0.004).
 _DEFAULT_HOUSING_TO_TIP = 0.2115
@@ -82,11 +90,55 @@ def rpy_deg_to_R(rpy_deg):
     return Rz @ Ry @ Rx
 
 
+def rpy_deg_from_R(R):
+    """Inverse of `rpy_deg_to_R` (ZYX / yaw-pitch-roll)."""
+    R = np.asarray(R, float).reshape(3, 3)
+    pitch = float(np.arcsin(np.clip(-R[2, 0], -1.0, 1.0)))
+    if abs(np.cos(pitch)) < 1e-6:
+        roll = 0.0
+        yaw = float(np.arctan2(-R[0, 1], R[1, 1]))
+    else:
+        roll = float(np.arctan2(R[2, 1], R[2, 2]))
+        yaw = float(np.arctan2(R[1, 0], R[0, 0]))
+    return np.degrees([roll, pitch, yaw])
+
+
+def camera_pose_from_base(p_base, R_base, base_eye):
+    """World camera pose from robot-base FK and T_base_cam (`base_eye`)."""
+    R_be = rpy_deg_to_R(base_eye.rpy_deg)
+    R_base = np.asarray(R_base, float)
+    p_base = np.asarray(p_base, float)
+    R_cam = R_base @ R_be
+    p_cam = p_base + R_base @ np.asarray(base_eye.t, float)
+    return p_cam, R_cam
+
+
 @dataclass
 class HandEyeCalib:
     """Camera pose in the grasp/TCP frame (metres, RPY degrees)."""
     t: np.ndarray = field(default_factory=lambda: _DEFAULT_HAND_EYE_T.copy())
     rpy_deg: np.ndarray = field(default_factory=lambda: _DEFAULT_HAND_EYE_RPY.copy())
+
+
+@dataclass
+class BaseEyeCalib:
+    """Camera pose in the robot-base / link_base frame (metres, RPY degrees).
+
+    Bolted to the column so the arm does not have to scan for the board.
+    Live pose = base FK × this — never MuJoCo `cam_xpos`.
+    """
+    t: np.ndarray = field(default_factory=lambda: _DEFAULT_BASE_EYE_T.copy())
+    rpy_deg: np.ndarray = field(default_factory=lambda: _DEFAULT_BASE_EYE_RPY.copy())
+
+
+@dataclass
+class LidarEyeCalib:
+    """360° LiDAR origin in the grasp/TCP frame (metres, RPY degrees).
+
+    Live pose = TCP FK × this. Coarse drill/board XY only; pierce stays on the wrist D435i.
+    """
+    t: np.ndarray = field(default_factory=lambda: _DEFAULT_LIDAR_EYE_T.copy())
+    rpy_deg: np.ndarray = field(default_factory=lambda: _DEFAULT_LIDAR_EYE_RPY.copy())
 
 
 @dataclass
@@ -184,43 +236,92 @@ def on_board_face(hit, hole, board_n, board_half, margin=0.01):
 
 
 @dataclass
+class HardwareCalib:
+    """Connection settings for `--backend real` (ignored by sim)."""
+    arm_ip: str = "192.168.1.xxx"
+    hand_port: str = ""
+    hand_baud: int = 115200
+    hand_slave_id: int = 1
+    rs_serial: str = ""
+    base_rs_serial: str = ""   # second D435i on the robot base; empty = skip
+    tcp_speed_mm_s: float = 80.0
+    joint_speed_deg_s: float = 30.0
+    connect_on_start: bool = False
+
+
+@dataclass
 class MilestoneCalib:
-    """Angled holes stay locked until perpendicular drilling is stable."""
+    """Angled holes stay locked until perpendicular batch eval is stable.
+
+    Preferred unlock: `python scripts/unlock_angled.py` after a passing
+    perpendicular `eval_batch`. `--allow-angled` remains a deliberate CLI override.
+    `allow_angled: true` in YAML alone does **not** unlock when `strict` is true.
+    """
     allow_angled: bool = False
     unlock_file: str = "config/angled_unlocked"
+    strict: bool = True
+    min_perp_success: float = 0.8
+    min_perp_runs: int = 10
+    baseline_metrics: str = "outputs/eval_batch.csv"
 
 
 @dataclass
 class CalibConfig:
     hand_eye: HandEyeCalib = field(default_factory=HandEyeCalib)
+    base_eye: BaseEyeCalib = field(default_factory=BaseEyeCalib)
+    lidar_eye: LidarEyeCalib = field(default_factory=LidarEyeCalib)
     board: BoardCalib = field(default_factory=BoardCalib)
     tool: ToolCalib = field(default_factory=ToolCalib)
     hand: HandCalib = field(default_factory=HandCalib)
     camera: CameraCalib = field(default_factory=CameraCalib)
+    cutting: CuttingCalib = field(default_factory=CuttingCalib)
+    hardware: HardwareCalib = field(default_factory=HardwareCalib)
     milestone: MilestoneCalib = field(default_factory=MilestoneCalib)
     source: str = ""
 
-    def angled_unlocked(self, cli_allow: bool = False) -> bool:
-        if cli_allow or self.milestone.allow_angled:
-            return True
+    def unlock_path(self) -> Path:
         path = Path(self.milestone.unlock_file)
-        if not path.is_absolute():
-            path = ROOT / path
-        return path.is_file()
+        return path if path.is_absolute() else ROOT / path
+
+    def baseline_metrics_path(self) -> Path:
+        path = Path(self.milestone.baseline_metrics)
+        return path if path.is_absolute() else ROOT / path
+
+    def angled_unlocked(self, cli_allow: bool = False) -> bool:
+        if cli_allow:
+            return True
+        path = self.unlock_path()
+        if path.is_file():
+            return True
+        if self.milestone.allow_angled and not self.milestone.strict:
+            return True
+        return False
 
 
 def _parse_dict(raw: dict | None) -> CalibConfig:
     raw = raw or {}
     he = raw.get("hand_eye") or {}
+    be = raw.get("base_eye") or {}
+    le = raw.get("lidar_eye") or {}
     bd = raw.get("board") or {}
     tool = raw.get("tool") or {}
     hd = raw.get("hand") or {}
     cam = raw.get("camera") or {}
+    cut = raw.get("cutting") or {}
+    hw = raw.get("hardware") or {}
     ms = raw.get("milestone") or {}
     return CalibConfig(
         hand_eye=HandEyeCalib(
             t=_as_vec3(he.get("t"), _DEFAULT_HAND_EYE_T),
             rpy_deg=_as_vec3(he.get("rpy_deg"), _DEFAULT_HAND_EYE_RPY),
+        ),
+        base_eye=BaseEyeCalib(
+            t=_as_vec3(be.get("t"), _DEFAULT_BASE_EYE_T),
+            rpy_deg=_as_vec3(be.get("rpy_deg"), _DEFAULT_BASE_EYE_RPY),
+        ),
+        lidar_eye=LidarEyeCalib(
+            t=_as_vec3(le.get("t"), _DEFAULT_LIDAR_EYE_T),
+            rpy_deg=_as_vec3(le.get("rpy_deg"), _DEFAULT_LIDAR_EYE_RPY),
         ),
         board=BoardCalib(
             position=_as_vec3(bd.get("position"), [0.64, -0.34, 0.34]),
@@ -247,9 +348,31 @@ def _parse_dict(raw: dict | None) -> CalibConfig:
             edge_noise_m=float(cam["edge_noise_m"]) if "edge_noise_m" in cam else 0.003,
             min_z=float(cam["min_z"]) if "min_z" in cam else _DEFAULT_MIN_Z,
         ),
+        cutting=CuttingCalib(
+            enabled=bool(cut.get("enabled", True)),
+            axial_n_per_m=float(cut.get("axial_n_per_m", 240.0)),
+            axial_damp_ns_per_m=float(cut.get("axial_damp_ns_per_m", 40.0)),
+            torque_nm_per_m=float(cut.get("torque_nm_per_m", 4.0)),
+            viscous_nm_s=float(cut.get("viscous_nm_s", 0.0004)),
+        ),
+        hardware=HardwareCalib(
+            arm_ip=str(hw.get("arm_ip", "192.168.1.xxx")),
+            hand_port=str(hw.get("hand_port", "") or ""),
+            hand_baud=int(hw.get("hand_baud", 115200)),
+            hand_slave_id=int(hw.get("hand_slave_id", 1)),
+            rs_serial=str(hw.get("rs_serial", "") or ""),
+            base_rs_serial=str(hw.get("base_rs_serial", "") or ""),
+            tcp_speed_mm_s=float(hw.get("tcp_speed_mm_s", 80.0)),
+            joint_speed_deg_s=float(hw.get("joint_speed_deg_s", 30.0)),
+            connect_on_start=bool(hw.get("connect_on_start", False)),
+        ),
         milestone=MilestoneCalib(
             allow_angled=bool(ms.get("allow_angled", False)),
             unlock_file=str(ms.get("unlock_file", "config/angled_unlocked")),
+            strict=bool(ms.get("strict", True)),
+            min_perp_success=float(ms.get("min_perp_success", 0.8)),
+            min_perp_runs=int(ms.get("min_perp_runs", 10)),
+            baseline_metrics=str(ms.get("baseline_metrics", "outputs/eval_batch.csv")),
         ),
     )
 

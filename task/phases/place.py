@@ -3,21 +3,25 @@ import numpy as np
 
 from task.constants import STANDOFF
 from task.held import relocate_held_drill
+from task.motion_ctrl import safe_goto_joints
 
 
 def place_drill(ctx):
     if ctx.args.no_place:
         return
     ctx.phase("8/8 place the drill back")
+    place = ctx.motion["place"]
     pg, Rg, a, p_slide = ctx.pg, ctx.Rg, ctx.a, ctx.p_slide
-    relocate_held_drill(ctx, pg + np.array([0.0, 0.0, 0.12]), Rg, T=2.5, name="return")
-    p_place = pg + [0, 0, 0.004]
-    wps = [pg + [0, 0, 0.12], pg + [0, 0, 0.06], p_place, pg - STANDOFF * a, p_slide]
-    chain, margin = ctx.robot.plan_path_ik(wps, Rg, min_margin=0.1)
-    ctx.gates.check_joint_margin(margin)
-    ctx.robot.move_joint_path(chain, T_first=3.0, T_step=0.8)
-    ctx.gates.check_joint_margin(ctx.robot.limit_margin(ctx.robot.get_q()))
-    ctx.robot.move_to_pose(p_place, Rg, T=2.0); ctx.robot.wait(0.3)
+    hover = pg + np.array([0.0, 0.0, 0.12])
+    relocate_held_drill(ctx, hover, Rg, profile="relocate", name="return")
+    p_mid = pg + np.array([0.0, 0.0, 0.06])
+    p_place = pg + np.array([0.0, 0.0, 0.004])
+    for p, tag, dist in ((p_mid, "place-mid", 0.06), (p_place, "place-down", 0.06)):
+        ctx.gates.check_workspace(p, tag)
+        ctx.robot.move_to_pose(p, Rg, **place.cart_kwargs(dist))
+        ctx.gates.check_tracking(ctx.robot.max_track_err, tag)
+        ctx.gates.check_joint_margin(ctx.robot.limit_margin(ctx.robot.get_q()))
+    ctx.robot.wait(0.3)
     ctx.log(f"place: max tracking err {ctx.robot.max_track_err*1000:.1f} mm")
 
     def tilt():
@@ -26,15 +30,17 @@ def place_drill(ctx):
         return np.degrees(np.arccos(np.clip(ctx.data.body("drill").xmat.reshape(3, 3)[2, 2], -1, 1)))
 
     ctx.hand.set_angles([1000, 1000, 1000, 1000, 1000, 0], speed=600); ctx.robot.wait(1.2)
+    ctx.st["holding"] = False
     ctx.log(f"  released, tilt {tilt():.1f}")
-    ctx.robot.move_to_pose(pg - STANDOFF * a, Rg, T=0.6)
-    ctx.robot.move_to_pose(p_slide, Rg, T=1.8)
+    ctx.robot.move_to_pose(pg - STANDOFF * a, Rg, **place.cart_kwargs(STANDOFF))
+    ctx.robot.move_to_pose(p_slide, Rg, **place.cart_kwargs(0.12))
     ctx.log(f"  slid out, tilt {tilt():.1f}, max tracking {ctx.robot.max_track_err*1000:.1f} mm")
-    ctx.robot.move_to_pose(p_slide - 0.09 * a, Rg, T=1.2)
-    ctx.robot.move_to_pose(p_slide - 0.09 * a + [0, 0, 0.12], Rg, T=1.2)
+    ctx.robot.move_to_pose(p_slide - 0.09 * a, Rg, **place.cart_kwargs(0.09))
+    ctx.robot.move_to_pose(p_slide - 0.09 * a + [0, 0, 0.12], Rg, **place.cart_kwargs(0.12))
     ctx.log(f"  backed off, tilt {tilt():.1f}, max tracking {ctx.robot.max_track_err*1000:.1f} mm")
     ctx.hand.set_angles(ctx.hand.OPEN, speed=800)
-    ctx.robot.move_joints(ctx.robot.rest_q, T=2.5)
+    safe_goto_joints(
+        ctx.robot, ctx.robot.rest_q, gates=ctx.gates, T=place.joint_T)
     ctx.log(f"  home, tilt {tilt():.1f}")
     if ctx.data is None:
         place_disp = 0.0

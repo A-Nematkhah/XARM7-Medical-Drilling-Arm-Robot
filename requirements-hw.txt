@@ -1,0 +1,5 @@
+# Optional packages for --backend real (robot PC only). Sim / pytest / eval skip these.
+# xArm SDK: pip install from https://github.com/xArm-Developer/xArm-Python-SDK
+#   or: pip install xArm-Python-SDK
+pyrealsense2>=2.54.0
+pyserial>=3.5

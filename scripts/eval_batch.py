@@ -1,7 +1,11 @@
 """Run several randomised sim trials and print a pass/fail summary.
 
+Each seed jitters the face mark and the drill XY left of the fixed board (`--random`).
+Pass `--fixed-spawn` after `--` for the default drill/mark.
+
     python scripts/eval_batch.py --seeds 0-9 --tilt 15 --azim 10
     python scripts/eval_batch.py --seeds 1,2,5 --no-place --min-success 0.8
+    python scripts/eval_batch.py --seeds 0-9 -- --fixed-board
 """
 import argparse
 import csv
@@ -60,6 +64,9 @@ def report(rows):
         mean_sd("approach_clear_mm", "mm")
         mean_sd("bit_angle_err_deg", "deg")
         mean_sd("board_hole_err_mm", "mm")
+        mean_sd("cut_force_n", "N")
+        mean_sd("cut_torque_nm", "N*m")
+        mean_sd("chuck_rpm", "rpm")
     return rate
 
 

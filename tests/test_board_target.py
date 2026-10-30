@@ -36,6 +36,23 @@ def test_near_board_prior_filters_around_calib_pose():
     assert np.allclose(near[0], P[0])
 
 
+def test_detect_require_target_false_falls_back_to_offset(monkeypatch):
+    det = BoardDetector(cam=None, hole_offset_yz=(0.02, -0.01), target_mode="marker")
+    rgb = np.zeros((8, 8, 3), np.uint8)
+    depth = np.ones((8, 8), np.float32)
+    pose = (np.array([0.2, 0.0, 0.3]), np.eye(3))
+    P = np.array([[0.64, y, z] for y in np.linspace(-0.05, 0.05, 12)
+                  for z in np.linspace(0.30, 0.38, 12)])
+    monkeypatch.setattr(det, "_board_cloud", lambda *a, **k: (P, np.zeros((8, 8), np.uint8)))
+    monkeypatch.setattr(det, "_resolve_hole",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no mark")))
+    with pytest.raises(RuntimeError, match="no mark"):
+        det.detect(rgb, depth, pose, require_target=True)
+    est = det.detect(rgb, depth, pose, require_target=False)
+    assert est.target_source == "offset"
+    assert abs((est.hole - est.point) @ est.normal) < 1e-6
+
+
 def test_offset_hole_lies_in_plane():
     det = BoardDetector(cam=None, hole_offset_yz=(0.02, -0.01), target_mode="offset")
     center = np.array([0.628, -0.34, 0.34])
